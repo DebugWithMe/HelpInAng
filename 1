@@ -1,3 +1,22 @@
+getOverallHealthStatusText(): string {
+      if (this.healthError) {
+          return 'DOWN'; // Or 'UNREACHABLE' or 'ERROR'
+      }
+      return this.healthData?.status || 'UNKNOWN'; // Use status from data if no error
+  }
+
+
+  getHealthComponents(status: HealthStatus | null): { key: string, value: HealthStatus }[] {
+    // If there was an error fetching overall health, don't show components
+
+
+
+
+
+
+
+
+
 // Replace the existing 'case caches:' block in actuator-display.component.ts -> processData with this:
 
 case 'caches':
