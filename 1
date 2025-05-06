@@ -1,1 +1,187 @@
+// src/app/actuator-display/actuator-display.component.ts
+import { Component, Input, OnChanges, SimpleChanges, ChangeDetectionStrategy } from '@angular/core';
+import { HealthStatus, EnvData, PropertySource } from '../services/data-fetch.service'; // Import interfaces as needed
 
+// Keep interface from previous steps if using flattening for env
+interface DisplayProperty {
+    name: string;
+    value: any;
+    source?: string;
+}
+// Add interface for generic key-value display
+interface KeyValueItem {
+    key: string;
+    value: any;
+}
+
+
+@Component({
+  selector: 'app-actuator-display',
+  templateUrl: './actuator-display.component.html',
+  styleUrls: ['./actuator-display.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ActuatorDisplayComponent implements OnChanges {
+  @Input() data: any;
+  @Input() endpoint: string = '';
+
+  // Specific data views (keep existing ones needed)
+  healthStatus: HealthStatus | null = null;
+  // infoData: { key: string, value: any }[] = []; // Keep if separate info view exists
+  envProperties: DisplayProperty[] = [];
+  filteredEnvProperties: DisplayProperty[] = [];
+  // cachesData: { name: string, target: string }[] = []; // REMOVE THIS - Replacing with generic view
+  genericData: string = ''; // For fallback JSON display
+
+  // *** NEW Property for generic Key-Value display ***
+  genericKeyValueData: KeyValueItem[] = [];
+  processedDataType: 'health' | 'env' | 'key-value' | 'json' | 'none' = 'none'; // Flag to help template
+
+  envSearchTerm: string = '';
+
+  ngOnChanges(changes: SimpleChanges): void {
+    if (changes['data'] || changes['endpoint']) {
+      this.resetViews();
+      this.processData();
+    }
+  }
+
+  private resetViews(): void {
+    this.healthStatus = null;
+    // this.infoData = []; // Reset if separate info view exists
+    this.envProperties = [];
+    this.filteredEnvProperties = [];
+    // this.cachesData = []; // REMOVE THIS
+    this.genericData = '';
+    this.envSearchTerm = '';
+    // *** Reset new property ***
+    this.genericKeyValueData = [];
+    this.processedDataType = 'none';
+  }
+
+  private processData(): void {
+    if (!this.data) {
+        this.processedDataType = 'none';
+        return;
+    };
+
+    this.processedDataType = 'json'; // Default before specific processing
+
+    try {
+        switch (this.endpoint) {
+          case 'health':
+            this.healthStatus = this.data as HealthStatus;
+            this.processedDataType = 'health';
+            break;
+          // case 'info': // Keep if separate info view needed, might use genericKeyValueData too
+          //   // Or potentially process info using genericKeyValueData as well?
+          //   this.genericKeyValueData = Object.entries(this.data)
+          //                         .map(([key, value]) => ({ key, value }))
+          //                         .sort((a, b) => a.key.localeCompare(b.key));
+          //   this.processedDataType = 'key-value';
+          //   break;
+          case 'env':
+            this.processEnvData(this.data as EnvData); // Assumes processEnvData populates envProperties/filteredEnvProperties
+            this.processedDataType = 'env';
+            break;
+
+          // *** UPDATED 'caches' Case ***
+          case 'caches':
+            // Check if data.caches exists and is an object
+            if (this.data?.caches && typeof this.data.caches === 'object' && !Array.isArray(this.data.caches)) {
+                 this.genericKeyValueData = Object.entries(this.data.caches)
+                    .map(([key, value]: [string, any]) => ({ key, value })) // Keep the whole value object
+                    .sort((a, b) => a.key.localeCompare(b.key)); // Sort by cache name
+            } else {
+                 // Handle cases where data.caches is missing, null, or not an object
+                 console.warn(`Unexpected data structure for /caches endpoint:`, this.data);
+                 this.genericKeyValueData = []; // Ensure it's empty if data is wrong
+            }
+            this.processedDataType = 'key-value'; // Use the key-value display type
+            break;
+
+          default:
+            // Fallback for unknown endpoints: display formatted JSON
+            this.genericData = JSON.stringify(this.data, null, 2);
+            this.processedDataType = 'json';
+            break;
+        }
+    } catch (error) {
+        console.error(`Error processing data for endpoint ${this.endpoint}:`, error);
+        this.genericData = `Error displaying data. Check console for details.\nRaw data:\n${JSON.stringify(this.data, null, 2)}`;
+        this.processedDataType = 'json'; // Show raw JSON on processing error
+    }
+  }
+
+  // --- Keep existing helper methods ---
+  private processEnvData(envData: EnvData): void { /* ... existing logic ... */
+    const DEFAULT_ENV_PROPERTIES_TO_SHOW = [ /* ... */ ];
+    // ... logic to populate this.envProperties and this.filteredEnvProperties ...
+    this.filterEnvData();
+  }
+  filterEnvData(): void { /* ... existing logic ... */ }
+  getHealthStatusClass(status: string | undefined): string { /* ... existing logic ... */ }
+  getHealthStatusIcon(status: string | undefined): string { /* ... existing logic ... */ }
+  getHealthComponents(status: HealthStatus | null): { key: string, value: HealthStatus }[] { /* ... existing logic ... */ }
+  isSimpleObject(value: any): boolean { /* ... existing logic ... */ } // Keep if needed for health details?
+  getObjectKeys(value: any): string[] { /* ... existing logic ... */ } // Keep if needed for health details?
+  formatSimpleValue(value: any): string { /* ... existing logic ... */ } // Keep if needed for health details?
+
+
+   // --- TrackBy functions ---
+   trackByKey(index: number, item: { key: string }): string { return item.key; }
+   trackByName(index: number, item: { name: string }): string { return item.name; }
+   trackByPropName(index: number, item: DisplayProperty): string { return item.name; }
+   trackByString(index: number, item: string): string { return item; } // Add if not present
+}
+
+
+
+
+
+
+
+<div [ngSwitch]="endpoint" class="actuator-content">
+
+  <ng-container *ngSwitchCase="'health'">
+    </ng-container>
+
+  <ng-container *ngSwitchCase="'env'">
+     </ng-container>
+
+  <ng-container *ngSwitchCase="'caches'">
+    <div *ngIf="processedDataType === 'key-value'" class="key-value-view caches-view">
+        <h4>Available Caches</h4>
+        <table class="styled-table key-value-table" *ngIf="genericKeyValueData.length > 0; else noCachesData">
+            <thead>
+                <tr>
+                    <th>Cache Name</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr *ngFor="let item of genericKeyValueData; trackBy: trackByKey">
+                    <td><strong>{{ item.key }}</strong></td>
+                    <td>
+                        <app-json-viewer-node [data]="item.value"></app-json-viewer-node>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        <ng-template #noCachesData>
+            <p class="no-details">No cache information available or the structure was not recognized.</p>
+        </ng-template>
+    </div>
+    <div *ngIf="processedDataType !== 'key-value'">
+         <p>Could not display cache data in the expected format.</p>
+         </div>
+  </ng-container>
+
+  <ng-container *ngSwitchDefault>
+    <div class="generic-view">
+        <h4>{{ endpoint | titlecase }} Data</h4>
+        <pre class="json-viewer">{{ genericData || (data | json) }}</pre>
+    </div>
+  </ng-container>
+
+</div>
