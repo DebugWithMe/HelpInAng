@@ -1,3 +1,118 @@
+<div class="overview-container">
+  <h3 class="overview-title">Overview for {{ environment.toUpperCase() }} Environment</h3>
+
+  <div class="overview-grid">
+
+    <section class="health-section card">
+      <header class="card-header">
+        <i class="fas fa-heartbeat icon"></i> Health Status
+      </header>
+      <div class="card-body">
+
+        <div *ngIf="healthError" class="alert alert-warning health-fetch-error">
+          <i class="fas fa-exclamation-triangle"></i> Fetch Error: {{ healthError }}
+        </div>
+
+        <div *ngIf="healthData || healthError" class="health-status-wrapper">
+          <div class="overall-status-badge" [ngClass]="getHealthStatusClass(healthData?.status)">
+              <i class="fas fa-fw status-icon" [ngClass]="getHealthStatusIcon(healthData?.status)"></i>
+              <span class="status-text">{{ getOverallHealthStatusText() }}</span>
+          </div>
+        </div>
+
+        <div *ngIf="!healthError && healthData">
+            <div *ngIf="getHealthComponents(healthData).length > 0" class="components-table-wrapper">
+              <h4>Components</h4>
+              <table class="styled-table health-components-table">
+                <thead>
+                  <tr>
+                    <th>Component Name</th>
+                    <th>Status</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr *ngFor="let comp of getHealthComponents(healthData); trackBy: trackByKey">
+                    <td class="component-key"><strong>{{ comp.key }}</strong></td>
+                    <td>
+                      <span class="status-badge" [ngClass]="getHealthStatusClass(comp.value.status)">
+                        <i class="fas fa-fw" [ngClass]="getHealthStatusIcon(comp.value.status)"></i>
+                        {{ comp.value.status || 'UNKNOWN' }}
+                      </span>
+                    </td>
+                    <td>
+                      <ng-container *ngIf="isSimpleObject(comp.value.details) && getObjectKeys(comp.value.details).length < 4 && getObjectKeys(comp.value.details).length > 0; else detailsPre">
+                          <ul class="details-list">
+                              <li *ngFor="let detailKey of getObjectKeys(comp.value.details); trackBy: trackByString">
+                                  <strong>{{ detailKey }}:</strong> {{ formatSimpleValue(comp.value.details[detailKey]) }}
+                              </li>
+                          </ul>
+                      </ng-container>
+                      <ng-template #detailsPre>
+                          <pre *ngIf="comp.value.details">{{ comp.value.details | json }}</pre>
+                          <span *ngIf="!comp.value.details">-</span>
+                      </ng-template>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+             <div *ngIf="getHealthComponents(healthData).length === 0" class="no-details">
+               <p>No detailed health components reported.</p>
+            </div>
+        </div>
+
+         <div *ngIf="!healthError && !healthData" class="no-details">
+            <p>Health data not available.</p>
+         </div>
+      </div> </section> <section class="info-section card">
+      <header class="card-header">
+        <i class="fas fa-info-circle icon"></i> Application Info
+      </header>
+      <div class="card-body">
+
+        <div *ngIf="infoError" class="alert alert-warning">
+           <i class="fas fa-exclamation-triangle"></i> Could not load info data: {{ infoError }}
+        </div>
+
+        <div *ngIf="!infoError && infoData" class="info-content">
+            <table class="styled-table info-table" *ngIf="getObjectKeys(infoData).length > 0; else noInfoKeys">
+                <thead>
+                    <tr>
+                        <th>Property</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr *ngFor="let infoKey of getObjectKeys(infoData); trackBy: trackByString">
+                        <td><strong>{{ infoKey }}</strong></td>
+                        <td>
+                            <app-json-viewer-node [data]="infoData[infoKey]"></app-json-viewer-node>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+             <ng-template #noInfoKeys>
+                <p class="no-details">Info endpoint returned no data.</p>
+             </ng-template>
+        </div>
+
+         <div *ngIf="!infoError && !infoData">
+            <p class="no-details">Info data not available.</p>
+         </div>
+      </div> </section> </div> </div> ```
+
+This template provides the structure for the combined view, correctly handles error states for both health and info, displays the health status prioritizing errors, and uses the `app-json-viewer-node` component to render the potentially nested info data.
+
+
+
+
+
+
+
+
+
+
 <div *ngIf="!healthError && !healthData" class="no-details"> <p>Health data not available.</p>
 </div>
 <div *ngIf="healthData || healthError" class="health-content">
