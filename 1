@@ -1,3 +1,589 @@
+import { Component, Input, OnChanges, SimpleChanges, ChangeDetectionStrategy } from '@angular/core';
+// Assuming interfaces might be needed for Health/Env processing
+import { HealthStatus, EnvData, PropertySource } from '../services/data-fetch.service';
+
+// Interface for generic key-value display (used by 'caches')
+interface KeyValueItem {
+    key: string;
+    value: any;
+}
+
+// Interface for Env properties display (if still using specific 'env' view)
+interface DisplayProperty {
+    name: string;
+    value: any;
+    source?: string;
+}
+
+@Component({
+  selector: 'app-actuator-display',
+  templateUrl: './actuator-display.component.html',
+  styleUrls: ['./actuator-display.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ActuatorDisplayComponent implements OnChanges {
+  @Input() data: any; // Raw data for the specific endpoint
+  @Input() endpoint: string = ''; // Name of the endpoint being displayed
+
+  // --- State properties for different view types ---
+  healthStatus: HealthStatus | null = null;
+  envProperties: DisplayProperty[] = [];
+  filteredEnvProperties: DisplayProperty[] = [];
+  genericKeyValueData: KeyValueItem[] = []; // Used for 'caches' now
+  genericData: string = ''; // For default raw JSON display
+  processedDataType: 'health' | 'env' | 'key-value' | 'json' | 'none' = 'none'; // Flag for template conditional logic
+  envSearchTerm: string = '';
+
+  // Predefined list for the specific 'env' view rendering
+  private readonly DEFAULT_ENV_PROPERTIES_TO_SHOW = [
+    'spring.application.name', 'spring.profiles.active', 'server.port',
+    'os.name', 'os.version', 'os.arch', 'java.version', 'java.vendor', 'java.home',
+    // Add other important properties here
+  ];
+
+  constructor() { }
+
+  ngOnChanges(changes: SimpleChanges): void {
+    // Re-process data when input data or endpoint name changes
+    if (changes['data'] || changes['endpoint']) {
+      this.resetViews();
+      this.processData();
+    }
+  }
+
+  /** Clears all view-specific state properties. */
+  private resetViews(): void {
+    this.healthStatus = null;
+    this.envProperties = [];
+    this.filteredEnvProperties = [];
+    this.genericKeyValueData = [];
+    this.genericData = '';
+    this.envSearchTerm = '';
+    this.processedDataType = 'none';
+  }
+
+  /** Processes the input data based on the endpoint type. */
+  private processData(): void {
+    if (!this.data) {
+        this.processedDataType = 'none';
+        return;
+    };
+
+    // Default to showing raw JSON if specific processing fails or isn't defined
+    this.processedDataType = 'json';
+    this.genericData = JSON.stringify(this.data, null, 2); // Prepare fallback JSON string
+
+    try {
+        switch (this.endpoint) {
+          case 'health':
+            this.healthStatus = this.data as HealthStatus;
+            this.processedDataType = 'health';
+            break;
+
+          case 'env':
+            // Assumes processEnvData populates envProperties/filteredEnvProperties
+            this.processEnvData(this.data as EnvData);
+            this.processedDataType = 'env';
+            break;
+
+          case 'caches':
+            // Process caches data into generic key-value structure
+            if (this.data?.caches && typeof this.data.caches === 'object' && !Array.isArray(this.data.caches)) {
+                 this.genericKeyValueData = Object.entries(this.data.caches)
+                    .map(([key, value]: [string, any]) => ({ key, value })) // Keep the whole value object
+                    .sort((a, b) => a.key.localeCompare(b.key)); // Sort by cache name
+            } else {
+                 console.warn(`Unexpected data structure for /caches endpoint:`, this.data);
+                 this.genericKeyValueData = []; // Ensure empty if data is wrong
+            }
+            this.processedDataType = 'key-value'; // Use the key-value display type
+            break;
+
+          // No 'info' case here, assuming handled by OverviewDisplayComponent
+
+          default:
+            // Keep genericData prepared above for unknown endpoints
+            this.processedDataType = 'json';
+            break;
+        }
+    } catch (error) {
+        console.error(`Error processing data for endpoint ${this.endpoint}:`, error);
+        // Keep genericData prepared above as fallback on processing error
+        this.processedDataType = 'json';
+    }
+  }
+
+  // --- Specific processing logic for 'env' endpoint ---
+  private processEnvData(envData: EnvData): void {
+    const allProps = new Map<string, DisplayProperty>();
+    if (envData?.propertySources) {
+        for (let i = envData.propertySources.length - 1; i >= 0; i--) { // Reverse precedence
+            const source = envData.propertySources[i];
+            if (source?.properties) {
+                 Object.entries(source.properties).forEach(([propName, propDetails]) => {
+                    if (this.DEFAULT_ENV_PROPERTIES_TO_SHOW.includes(propName) && !allProps.has(propName)) {
+                         allProps.set(propName, {
+                            name: propName,
+                            value: propDetails.value,
+                            source: propDetails.origin || source.name
+                         });
+                    }
+                 });
+            }
+        }
+    }
+     this.DEFAULT_ENV_PROPERTIES_TO_SHOW.forEach(propName => { // Add missing defaults
+        if (!allProps.has(propName)) {
+             allProps.set(propName, { name: propName, value: 'N/A', source: 'Not Found' });
+        }
+    });
+    this.envProperties = Array.from(allProps.values()).sort((a, b) => a.name.localeCompare(b.name));
+    this.filterEnvData(); // Initialize filtered view
+  }
+
+  // Filters the env properties based on the search term
+  filterEnvData(): void {
+       if (!this.envSearchTerm) {
+           this.filteredEnvProperties = [...this.envProperties];
+       } else {
+           const term = this.envSearchTerm.toLowerCase();
+           this.filteredEnvProperties = this.envProperties.filter(prop =>
+                prop.name.toLowerCase().includes(term) ||
+                String(prop.value).toLowerCase().includes(term) ||
+                prop.source?.toLowerCase().includes(term)
+           );
+       }
+   }
+
+  // --- Health View Helper methods ---
+  getHealthStatusClass(status: string | undefined): string {
+    switch (status?.toUpperCase()) {
+      case 'UP': return 'status-up';
+      case 'DOWN': return 'status-down';
+      case 'OUT_OF_SERVICE': return 'status-warning';
+      case 'UNKNOWN': return 'status-unknown';
+      default: return 'status-unknown';
+    }
+  }
+
+  getHealthStatusIcon(status: string | undefined): string {
+     switch (status?.toUpperCase()) {
+      case 'UP': return 'fa-check-circle';
+      case 'DOWN': return 'fa-times-circle';
+      case 'OUT_OF_SERVICE': return 'fa-exclamation-triangle';
+      case 'UNKNOWN': return 'fa-question-circle';
+      default: return 'fa-question-circle';
+    }
+  }
+
+  getHealthComponents(status: HealthStatus | null): { key: string, value: HealthStatus }[] {
+    if (!status?.components) return [];
+    return Object.entries(status.components)
+                  .map(([key, value]) => ({ key, value }))
+                  .sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  // Helpers needed for simplified health details display (optional)
+  getObjectKeys(obj: any): string[] {
+    return typeof obj === 'object' && obj !== null && !Array.isArray(obj) ? Object.keys(obj).sort() : [];
+  }
+  formatSimpleValue(value: any): string {
+    if (value === null || value === undefined) return 'N/A';
+    if (Array.isArray(value)) return value.join(', ');
+    return String(value);
+  }
+   isSimpleObject(value: any): boolean {
+       return typeof value === 'object' && value !== null && !Array.isArray(value);
+   }
+
+   // --- TrackBy functions ---
+   trackByKey(index: number, item: { key: string }): string { return item.key; }
+   trackByPropName(index: number, item: DisplayProperty): string { return item.name; }
+   trackByString(index: number, item: string): string { return item; }
+}
+
+
+
+
+
+
+
+<div [ngSwitch]="endpoint" class="actuator-content">
+
+  <ng-container *ngSwitchCase="'health'">
+    <div *ngIf="processedDataType === 'health' && healthStatus" class="health-view">
+      <div class="overall-status-badge" [ngClass]="getHealthStatusClass(healthStatus.status)">
+        <i class="fas fa-fw status-icon" [ngClass]="getHealthStatusIcon(healthStatus.status)"></i>
+        <span class="status-text">{{ healthStatus.status || 'UNKNOWN' }}</span>
+      </div>
+
+       <div *ngIf="healthStatus.details" class="details-section">
+           <h4>Details:</h4>
+           <pre>{{ healthStatus.details | json }}</pre>
+       </div>
+
+      <div *ngIf="getHealthComponents(healthStatus).length > 0" class="components-table-wrapper">
+        <h4>Components:</h4>
+        <table class="styled-table health-components-table">
+          <thead>
+            <tr>
+              <th>Component Name</th>
+              <th>Status</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let comp of getHealthComponents(healthStatus); trackBy: trackByKey">
+              <td class="component-key"><strong>{{ comp.key }}</strong></td>
+              <td>
+                <span class="status-badge" [ngClass]="getHealthStatusClass(comp.value.status)">
+                   <i class="fas fa-fw" [ngClass]="getHealthStatusIcon(comp.value.status)"></i>
+                  {{ comp.value.status || 'UNKNOWN' }}
+                </span>
+              </td>
+              <td>
+                 <ng-container *ngIf="isSimpleObject(comp.value.details) && getObjectKeys(comp.value.details).length < 4 && getObjectKeys(comp.value.details).length > 0; else detailsPre">
+                     <ul class="details-list">
+                         <li *ngFor="let detailKey of getObjectKeys(comp.value.details); trackBy: trackByString">
+                             <strong>{{ detailKey }}:</strong> {{ formatSimpleValue(comp.value.details[detailKey]) }}
+                         </li>
+                     </ul>
+                 </ng-container>
+                 <ng-template #detailsPre>
+                     <pre *ngIf="comp.value.details">{{ comp.value.details | json }}</pre>
+                     <span *ngIf="!comp.value.details">-</span>
+                 </ng-template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div *ngIf="getHealthComponents(healthStatus).length === 0" class="no-details">
+         <p>No detailed health components reported.</p>
+      </div>
+    </div>
+     <div *ngIf="processedDataType === 'health' && !healthStatus" class="no-details">
+         <p>Health data not available or could not be processed.</p>
+     </div>
+  </ng-container>
+
+  <ng-container *ngSwitchCase="'env'">
+    <div *ngIf="processedDataType === 'env'" class="env-view">
+        <h4>Environment Properties (Selected)</h4>
+        <p class="info-text">Showing a curated list of properties. Full environment details might be extensive.</p>
+         <div class="search-bar">
+             <input type="text"
+                    placeholder="Search properties..."
+                    [(ngModel)]="envSearchTerm"
+                    (ngModelChange)="filterEnvData()"
+                    class="form-control"/>
+             <i class="fas fa-search search-icon"></i>
+         </div>
+        <table class="styled-table env-properties-table" *ngIf="filteredEnvProperties.length > 0; else noEnvData">
+            <thead>
+                <tr>
+                    <th>Property Name</th>
+                    <th>Value</th>
+                    <th>Source</th>
+                </tr>
+            </thead>
+            <tbody>
+                 <tr *ngFor="let prop of filteredEnvProperties; trackBy: trackByPropName">
+                    <td class="prop-name">{{ prop.name }}</td>
+                    <td class="prop-value">
+                        <pre>{{ prop.value | json }}</pre>
+                    </td>
+                    <td class="prop-source">{{ prop.source }}</td>
+                 </tr>
+            </tbody>
+        </table>
+         <ng-template #noEnvData>
+             <p *ngIf="envProperties.length > 0" class="no-details">No properties match your search term "{{ envSearchTerm }}".</p>
+             <p *ngIf="envProperties.length === 0" class="no-details">No environment properties found or processed.</p>
+         </ng-template>
+    </div>
+    <div *ngIf="processedDataType !== 'env'" class="no-details">
+        <p>Environment data not available or could not be processed.</p>
+    </div>
+  </ng-container>
+
+  <ng-container *ngSwitchCase="'caches'">
+    <div *ngIf="processedDataType === 'key-value'" class="key-value-view caches-view">
+        <h4>Available Caches</h4>
+        <table class="styled-table key-value-table" *ngIf="genericKeyValueData.length > 0; else noCachesData">
+            <thead>
+                <tr>
+                    <th>Cache Name</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr *ngFor="let item of genericKeyValueData; trackBy: trackByKey">
+                    <td class="key-cell"><strong>{{ item.key }}</strong></td>
+                    <td class="value-cell">
+                        <app-json-viewer-node [data]="item.value"></app-json-viewer-node>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        <ng-template #noCachesData>
+            <p class="no-details">No cache information available or the structure was not recognized.</p>
+        </ng-template>
+    </div>
+     <div *ngIf="processedDataType !== 'key-value' && endpoint === 'caches'" class="no-details">
+         <p>Cache data not available or could not be processed.</p>
+     </div>
+  </ng-container>
+
+  <ng-container *ngSwitchDefault>
+    <div *ngIf="data; else noDefaultData" class="generic-view">
+        <h4>{{ endpoint | titlecase }} Data</h4>
+        <pre class="json-viewer">{{ genericData }}</pre>
+    </div>
+     <ng-template #noDefaultData>
+        <p class="no-details">Data for {{ endpoint }} not available.</p>
+    </ng-template>
+  </ng-container>
+
+</div>```
+
+---
+
+**3. `actuator-display.component.scss`**
+
+(This includes styles for all handled views: health, env, key-value/caches, generic JSON)
+
+```scss
+// src/app/actuator-display/actuator-display.component.scss
+
+// Base variables (can inherit via CSS vars from parent if preferred)
+:host {
+  display: block;
+  --status-up-color: var(--success-color, #198754);
+  --status-down-color: var(--danger-color, #dc3545);
+  --status-warning-color: var(--warning-color, #ffc107);
+  --status-unknown-color: var(--secondary-color, #6c757d);
+  --status-up-bg: #d1e7dd;
+  --status-down-bg: #f8d7da;
+  --status-warning-bg: #fff3cd;
+  --status-unknown-bg: #e2e3e5;
+  --table-border-color: #dee2e6;
+  --table-header-bg: #f8f9fa;
+  --table-row-hover-bg: #f1f3f5;
+  --pre-background: #e9ecef;
+  --pre-color: #343a40;
+  --spacing: 1rem;
+  --border-radius: 4px;
+  --primary-color: #007bff; // Used for headers maybe
+}
+
+// General Styles for Content Area
+.actuator-content {
+  h4 {
+    margin-top: 0;
+    margin-bottom: var(--spacing);
+    font-weight: 600;
+    color: var(--primary-color, #007bff);
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--table-border-color);
+    font-size: 1.2rem; // Slightly larger header
+  }
+
+  p.info-text {
+      font-size: 0.9em;
+      color: #6c757d;
+      margin-bottom: var(--spacing);
+      font-style: italic;
+  }
+   p.no-details {
+        font-style: italic;
+        color: #6c757d;
+        margin-top: var(--spacing);
+        text-align: center;
+   }
+
+  pre { // Default pre style if used directly
+    background-color: var(--pre-background);
+    color: var(--pre-color);
+    padding: 0.75rem;
+    border-radius: var(--border-radius);
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9em;
+    max-height: 400px;
+    overflow: auto;
+    border: 1px solid darken(var(--pre-background), 10%);
+  }
+}
+
+// --- Shared Table Styling ---
+.styled-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: var(--spacing);
+  font-size: 0.95rem;
+  background-color: #fff; // White background for tables
+  border: 1px solid var(--table-border-color); // Add outer border
+  border-radius: var(--border-radius); // Optional: round corners
+  overflow: hidden; // Needed for border-radius on table
+
+  th, td {
+    border: none; // Remove default borders if using collapse
+    border-bottom: 1px solid var(--table-border-color); // Horizontal lines
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+    vertical-align: top;
+    word-break: break-word;
+  }
+   tr:last-child td {
+       border-bottom: none; // No border on last row
+   }
+
+
+  thead th {
+    background-color: var(--table-header-bg);
+    font-weight: 600;
+    position: sticky; // Make headers sticky if table might scroll
+    top: 0;
+    z-index: 1;
+    border-bottom-width: 2px; // Thicker border under header
+  }
+
+  tbody tr:hover {
+    background-color: var(--table-row-hover-bg);
+  }
+
+  // Default pre style within tables (can be overridden)
+  pre {
+    background-color: #f1f1f1; color: #333;
+    padding: 0.4rem; border-radius: 3px;
+    white-space: pre-wrap; word-break: break-word;
+    font-family: 'Courier New', Courier, monospace; font-size: 0.85em;
+    max-height: 200px; overflow: auto;
+    border: 1px solid #ddd; margin: 0;
+  }
+}
+
+
+// --- Health View Styles ---
+.health-view {
+  .overall-status-badge {
+    padding: 0.5rem 1rem;
+    margin-bottom: calc(var(--spacing) * 1.2);
+    border-radius: var(--border-radius);
+    font-size: 1.1rem;
+    font-weight: 700;
+    display: inline-flex; align-items: center;
+    text-transform: uppercase; border-left-width: 4px; border-left-style: solid;
+
+    .status-icon { margin-right: 0.5rem; }
+    &.status-up { background-color: var(--status-up-bg); color: var(--status-up-color); border-left-color: var(--status-up-color); }
+    &.status-down { background-color: var(--status-down-bg); color: var(--status-down-color); border-left-color: var(--status-down-color); }
+    &.status-warning { background-color: var(--status-warning-bg); color: #664d03; border-left-color: var(--status-warning-color); }
+    &.status-unknown { background-color: var(--status-unknown-bg); color: var(--status-unknown-color); border-left-color: var(--status-unknown-color); }
+  }
+  .components-table-wrapper { margin-top: var(--spacing); }
+  h4 { margin-bottom: 0.5rem; font-size: 1rem; font-weight: 600; }
+
+  .health-components-table {
+    margin-top: 0;
+    td.component-key strong { color: #333; }
+    .status-badge {
+      display: inline-flex; align-items: center; padding: 0.2em 0.5em;
+      font-size: 0.85em; font-weight: 600; border-radius: var(--border-radius);
+      text-transform: uppercase; white-space: nowrap; color: #fff;
+      i { margin-right: 0.4em; }
+      &.status-up { background-color: var(--status-up-color); }
+      &.status-down { background-color: var(--status-down-color); }
+      &.status-warning { background-color: var(--status-warning-color); color: #333;}
+      &.status-unknown { background-color: var(--status-unknown-color); }
+    }
+     .details-list { list-style: none; padding: 0; margin: 0; font-size: 0.9em; color: #555; li { margin-bottom: 0.25rem; } strong { color: #333; } }
+     // Target pre specifically within health details if needed
+     td > pre { max-height: 100px; font-size: 0.8em; }
+  }
+  .details-section { margin-top: var(--spacing); }
+}
+
+
+// --- Env View Styles ---
+.env-view {
+    .search-bar {
+        position: relative; margin-bottom: var(--spacing); max-width: 400px;
+        .form-control { width: 100%; padding: 0.5rem 1rem; padding-right: 2.5rem; border: 1px solid var(--table-border-color); border-radius: var(--border-radius); font-size: 1rem; transition: border-color 0.2s ease, box-shadow 0.2s ease; &:focus { outline: none; border-color: var(--primary-color, #007bff); box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25); } }
+        .search-icon { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); color: #adb5bd; }
+    }
+    .env-properties-table {
+        td.prop-name { width: 35%; font-weight: 500; }
+        td.prop-value { width: 45%; }
+        td.prop-source { width: 20%; font-style: italic; color: #6c757d; font-size: 0.9em; }
+        td.prop-value pre { margin: 0; padding: 0.4rem; background-color: transparent; border: none; max-height: none; font-size: 1em; } // Simpler pre for env
+    }
+}
+
+// --- Key-Value View Styles (Used by Caches) ---
+.key-value-view {
+    // Specific styles for caches view if needed, e.g., .caches-view {}
+}
+.key-value-table {
+    td.key-cell strong { // Emphasize the key (Cache Name)
+         color: #333;
+    }
+     td.key-cell { width: 30%; } // Adjust width for key column
+     td.value-cell {
+         // The recursive component handles its own styling mostly
+         // Reset padding if the node adds its own
+         padding: 0; // Remove padding if node has its own table/list margins
+         app-json-viewer-node {
+             // Apply styles to the host if needed, e.g., remove default node font size change
+             // font-size: 1em;
+         }
+     }
+}
+
+
+// --- Generic/Default View Styles ---
+.generic-view {
+  .json-viewer { // Style the <pre> tag used for default JSON view
+    background-color: #2e2e2e; // Dark background example
+    color: #d4d4d4;      // Light text
+    border: 1px solid #444;
+    padding: var(--spacing);
+    border-radius: var(--border-radius);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: monospace; // Ensure monospace font
+    font-size: 14px;
+    max-height: 65vh; // Limit height
+    overflow: auto;
+  }
+}
+
+// General Input field styling (if form-control class is used anywhere)
+.form-control {
+  display: block; width: 100%; padding: .375rem .75rem;
+  font-size: 1rem; line-height: 1.5; color: #495057;
+  background-color: #fff; background-clip: padding-box;
+  border: 1px solid #ced4da; border-radius: .25rem;
+  transition: border-color .15s ease-in-out,box-shadow .15s ease-in-out;
+  &:focus { color: #495057; background-color: #fff; border-color: #80bdff; outline: 0; box-shadow: 0 0 0 .2rem rgba(0,123,255,.25); }
+}
+
+// Keyframes (if needed and not globally defined)
+@keyframes fa-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+
+
+
+
+
+
+
+
 // src/app/actuator-display/actuator-display.component.ts
 import { Component, Input, OnChanges, SimpleChanges, ChangeDetectionStrategy } from '@angular/core';
 import { HealthStatus, EnvData, PropertySource } from '../services/data-fetch.service'; // Import interfaces as needed
