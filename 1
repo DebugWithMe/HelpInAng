@@ -1,3 +1,29 @@
+<div *ngIf="!healthError && !healthData" class="no-details"> <p>Health data not available.</p>
+</div>
+<div *ngIf="healthData || healthError" class="health-content">
+    <div class="overall-status-badge" [ngClass]="getHealthStatusClass(healthData?.status)">
+        <i class="fas fa-fw status-icon" [ngClass]="getHealthStatusIcon(healthData?.status)"></i>
+        <span class="status-text">{{ getOverallHealthStatusText() }}</span>
+    </div>
+
+    <div *ngIf="!healthError && getHealthComponents(healthData).length > 0" class="components-table-wrapper">
+        </div>
+     <div *ngIf="!healthError && getHealthComponents(healthData).length === 0" class="no-details">
+        <p>No detailed health components reported.</p>
+     </div>
+</div>
+
+<div *ngIf="healthError" class="alert alert-warning health-fetch-error">
+    <i class="fas fa-exclamation-triangle"></i> Fetch Error: {{ healthError }}
+</div>
+
+
+
+
+
+
+
+
 getOverallHealthStatusText(): string {
       if (this.healthError) {
           return 'DOWN'; // Or 'UNREACHABLE' or 'ERROR'
