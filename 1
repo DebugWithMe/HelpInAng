@@ -1,3 +1,68 @@
+// Replace the existing 'case caches:' block in actuator-display.component.ts -> processData with this:
+
+case 'caches':
+    // Log the raw data received for easier debugging if structure changes later
+    console.log('DEBUG: Raw data received for /caches endpoint:', JSON.stringify(this.data, null, 2));
+
+    let cacheMap: object | null = null; // Variable to hold the target { key:data, key:data } map
+
+    // 1. Safely access the top-level 'cacheManagers' object
+    const managers = this.data?.cacheManagers;
+
+    if (managers && typeof managers === 'object' && !Array.isArray(managers)) {
+        // 2. Find the cache manager key.
+        //    Option A: If the key is *always* 'cacheManager':
+        //    cacheMap = managers['cacheManager']?.caches;
+
+        //    Option B: More robust - find the first manager key dynamically:
+        const managerKeys = Object.keys(managers);
+        if (managerKeys.length > 0) {
+            const firstManagerKey = managerKeys[0]; // Get the first manager's key
+            console.log(`DEBUG: Using cache manager key: ${firstManagerKey}`);
+            // 3. Access the 'caches' property within that manager object
+            cacheMap = managers[firstManagerKey]?.caches;
+        } else {
+             console.log("DEBUG: 'cacheManagers' object found, but it contains no managers.");
+        }
+    } else {
+         console.log("DEBUG: 'cacheManagers' key not found or not an object in the received data.");
+    }
+
+    // 4. Process the extracted cacheMap if it was found and is a valid object
+    if (cacheMap && typeof cacheMap === 'object' && !Array.isArray(cacheMap)) {
+         const cacheKeys = Object.keys(cacheMap);
+         if (cacheKeys.length > 0) {
+             // We found the actual map of caches, process it into KeyValueItem array
+             this.genericKeyValueData = Object.entries(cacheMap)
+                .map(([key, value]: [string, any]) => ({ key, value })) // Map to {key, value} format
+                .sort((a, b) => a.key.localeCompare(b.key)); // Sort alphabetically by cache name
+             console.log("Processed genericKeyValueData for caches:", this.genericKeyValueData);
+         } else {
+              console.log("DEBUG: Found 'caches' object within manager, but it's empty.");
+              this.genericKeyValueData = []; // Set to empty if the caches map itself is empty
+         }
+    } else {
+         // This handles cases where 'caches' wasn't found inside the manager,
+         // or 'cacheManagers' wasn't found, or the structure was wrong.
+         console.warn(`Could not find a valid 'caches' map within the expected structure:`, this.data);
+         this.genericKeyValueData = []; // Ensure empty if not found or not an object
+    }
+
+    this.processedDataType = 'key-value'; // Set the type flag for the template
+    break;
+
+// Make sure the rest of the switch statement (health, env, default) and the component file remain.
+
+
+
+
+
+
+
+
+
+
+
 import { Component, Input, OnChanges, SimpleChanges, ChangeDetectionStrategy } from '@angular/core';
 // Assuming interfaces might be needed for Health/Env processing
 import { HealthStatus, EnvData, PropertySource } from '../services/data-fetch.service';
