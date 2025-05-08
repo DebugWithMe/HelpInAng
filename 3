@@ -1,0 +1,292 @@
+<div class="actuator-container">
+
+  <div class="tabs-wrapper">
+
+    <div class="env-tabs-container">
+        <nav class="env-tabs" aria-label="Environments">
+          <button *ngFor="let env of environments; trackBy: trackByEnv"
+                  class="tab-btn"
+                  [class.active]="env === selectedEnvironment"
+                  (click)="onTabChange(env, selectedView)"
+                  [attr.aria-pressed]="env === selectedEnvironment">
+            {{ env.toUpperCase() }}
+          </button>
+        </nav>
+
+        <button class="refresh-btn" title="Refresh data for {{ selectedEnvironment.toUpperCase() }}"
+                 (click)="refreshCurrentEnvironment()"
+                 [disabled]="isLoading$ | async"> <i class="fas fa-sync" [class.fa-spin]="isLoading$ | async"></i>
+            <span class="refresh-text">Refresh {{ selectedEnvironment.toUpperCase() }}</span>
+         </button>
+    </div> <nav class="endpoint-tabs" aria-label="Actuator Views">
+      <button *ngFor="let tab of displayTabs; trackBy: trackByDisplayTab"
+              class="sub-tab-btn"
+              [class.active]="tab === selectedView"
+              (click)="onTabChange(selectedEnvironment, tab)"
+              [attr.aria-pressed]="tab === selectedView"
+              [class.has-error]="getTabError(currentEnvState$ | async, tab)"> <i class="fas fa-fw"
+            [ngClass]="{
+              'fa-tachometer-alt': tab === 'overview',
+              'fa-leaf': tab === 'env',
+              'fa-database': tab === 'caches',
+              'fa-question-circle': !displayTabs.includes(tab)
+            }"></i>
+        {{ tab | titlecase }}
+         <i *ngIf="getTabError(currentEnvState$ | async, tab)" class="fas fa-exclamation-triangle error-indicator"
+            [title]="getTabError(currentEnvState$ | async, tab) ?? 'Error loading data'"></i>
+      </button>
+    </nav>
+  </div>
+
+  <div class="content-area">
+    <div *ngIf="isLoading$ | async" class="loading-container" role="status" aria-live="polite">
+       <span>Loading data for {{ selectedEnvironment.toUpperCase() }}...</span>
+    </div>
+
+    <ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+        <div *ngIf="getGeneralError(currentEnvState) && !(isLoading$ | async)" class="alert alert-danger" role="alert">
+            <i class="fas fa-exclamation-triangle"></i>
+            <strong>Error:</strong> {{ getGeneralError(currentEnvState) }}
+            <button (click)="refreshCurrentEnvironment()" class="retry-btn">Retry</button>
+        </div>
+
+        <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)" class="data-display">
+            <app-overview-display
+                 *ngIf="selectedView === 'overview'"
+                 [healthData]="getHealthData(currentEnvState)"
+                 [healthError]="getHealthError(currentEnvState)"
+                 [infoData]="getInfoData(currentEnvState)"
+                 [infoError]="getInfoError(currentEnvState)"
+                 [environment]="selectedEnvironment">
+            </app-overview-display>
+            <ng-container *ngIf="selectedView !== 'overview'">
+                <div *ngIf="getErrorForView(currentEnvState, selectedView)" class="alert alert-warning" role="alert">
+                  <i class="fas fa-exclamation-triangle"></i>
+                  <strong>Error loading {{ selectedView }}:</strong> {{ getErrorForView(currentEnvState, selectedView) }}
+                </div>
+                <app-actuator-display
+                    *ngIf="!getErrorForView(currentEnvState, selectedView)"
+                    [data]="getDataForView(currentEnvState, selectedView)"
+                    [endpoint]="selectedView">
+                </app-actuator-display>
+            </ng-container>
+        </div>
+
+         <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)">
+             <div *ngIf="selectedView === 'overview' && !getHealthData(currentEnvState) && !getInfoData(currentEnvState) && !getHealthError(currentEnvState) && !getInfoError(currentEnvState) && currentEnvState" class="no-data">
+                 No Health or Info data was returned for {{ selectedEnvironment.toUpperCase() }}.
+             </div>
+              <div *ngIf="selectedView !== 'overview' && !getDataForView(currentEnvState, selectedView) && !getErrorForView(currentEnvState, selectedView) && currentEnvState" class="no-data">
+                   No data was returned for {{ selectedView }} in {{ selectedEnvironment.toUpperCase() }}.
+              </div>
+               <div *ngIf="!currentEnvState" class="no-data">
+                   Data for {{ selectedEnvironment.toUpperCase() }} has not been loaded yet. Click refresh or select the environment again.
+               </div>
+         </div>
+    </ng-container> </div> </div> ```
+*(Note: I wrapped the main content area in an `ng-container` resolving `currentEnvironmentState$` once to avoid repeating the `async` pipe multiple times inside, making it slightly cleaner).*
+
+---
+**2. `actuator-data.component.scss` (Updated)**
+---
+
+```scss
+// src/app/actuator-data/actuator-data.component.scss
+
+// Define base variables
+:host {
+  display: block;
+  --primary-color: #007bff;
+  --primary-color-hover: #0056b3;
+  --text-color-on-primary: #ffffff;
+  // ... other variables ...
+  --border-color: #dee2e6;
+  --tab-inactive-bg: #e9ecef;
+  --tab-inactive-text: #495057;
+  --error-color: #dc3545;
+  --border-radius: 6px;
+  --spacing: 1rem;
+  --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+// Main container styling
+.actuator-container {
+  font-family: var(--font-family);
+  padding: var(--spacing); // Padding on the main container
+  background-color: var(--background-color, #f8f9fa);
+  min-height: 100vh;
+}
+
+// REMOVE Header Styles
+// .actuator-header { ... }
+
+// Tabs Styling
+.tabs-wrapper {
+  // No top margin needed if header is gone
+  margin-bottom: calc(var(--spacing) * 1.5);
+}
+
+// NEW: Container for Env Tabs + Refresh Button
+.env-tabs-container {
+    display: flex;
+    flex-wrap: wrap; // Allow button to wrap below tabs on narrow screens
+    align-items: center; // Vertically align tabs row and button
+    gap: var(--spacing); // Space between tabs block and button if wrapped
+    margin-bottom: var(--spacing);
+    padding-bottom: var(--spacing);
+    border-bottom: 1px solid var(--border-color); // Separator line below this group
+}
+
+// Environment Tabs within the new container
+.env-tabs {
+  // Remove margin/padding/border as they are on the container now
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+  // Flex settings for the tabs themselves
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex-grow: 1; // Allow tabs section to take available horizontal space
+}
+
+// Refresh Button within the new container
+.env-tabs-container .refresh-btn {
+    margin-left: auto; // Pushes button to the far right within the flex container
+    padding: 0.5rem 1rem; // Adjust padding to visually match tabs better
+    font-size: 0.9rem;
+    flex-shrink: 0; // Prevent button from shrinking if space is tight
+    // Inherits base .refresh-btn styles from below
+}
+
+// Base Refresh Button styles (can be global or scoped if needed)
+.refresh-btn {
+    border: 1px solid var(--primary-color);
+    background-color: #fff;
+    color: var(--primary-color);
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    white-space: nowrap;
+
+    &:hover:not(:disabled) {
+        background-color: var(--primary-color);
+        color: #fff;
+    }
+    &:disabled {
+        opacity: 0.6; cursor: not-allowed; border-color: #ccc;
+        color: #666; background-color: #f8f9fa;
+    }
+    .fa-spin { animation: fa-spin 1.5s linear infinite; }
+    // Optional: Hide text span on smaller screens
+    // @media (max-width: 768px) { .refresh-text { display: none; } }
+}
+
+
+// Endpoint/View Tabs styling
+.endpoint-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  // No margin/padding/border needed as separation handled by container above
+}
+
+// General Button Styles for Tabs
+.tab-btn, .sub-tab-btn {
+  padding: 0.6rem 1.2rem;
+  border: 1px solid transparent;
+  background-color: var(--tab-inactive-bg);
+  color: var(--tab-inactive-text);
+  cursor: pointer;
+  border-radius: var(--border-radius);
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  position: relative;
+
+  &:hover:not(.active) { /* ... hover styles ... */
+      background-color: color-mix(in srgb, var(--tab-inactive-bg) 80%, black);
+      border-color: color-mix(in srgb, var(--tab-inactive-bg) 70%, black);
+   }
+  &.active { /* ... active styles ... */
+      background-color: var(--primary-color);
+      color: var(--text-color-on-primary);
+      border-color: var(--primary-color-hover);
+      font-weight: 700;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+  &.has-error { border-left: 4px solid var(--error-color); }
+  .error-indicator { color: var(--error-color); font-size: 0.9em; }
+}
+
+// Content Area Styling
+.content-area {
+  background-color: #ffffff;
+  border-radius: var(--border-radius);
+  padding: calc(var(--spacing) * 1.5);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  min-height: 300px;
+  position: relative; // For spinner positioning
+  margin-top: var(--spacing); // Add space below view tabs
+}
+
+// Loading Spinner Styling
+.loading-container { /* ... existing styles ... */
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: calc(var(--spacing) * 2); color: #555; font-weight: 600; position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255, 255, 255, 0.85);
+    z-index: 10; border-radius: var(--border-radius);
+  .spinner { /* ... existing styles ... */
+      border: 4px solid #f3f3f3; border-top: 4px solid var(--primary-color); border-radius: 50%;
+      width: 40px; height: 40px; animation: fa-spin 1s linear infinite; margin-bottom: var(--spacing);
+  }
+  span { font-size: 1rem; }
+}
+
+// Alert Box Styling
+.alert { /* ... existing styles ... */
+  padding: var(--spacing); margin-bottom: var(--spacing); border: 1px solid transparent;
+  border-radius: var(--border-radius); display: flex; align-items: center; gap: 0.75rem;
+  &.alert-danger { /* ... */ color: var(--error-color); background-color: var(--error-bg); border-color: color-mix(in srgb, var(--error-bg) 80%, black); }
+  &.alert-warning { /* ... */ color: #664d03; background-color: var(--warning-bg); border-color: #ffecb5; }
+  i.fas { font-size: 1.2em; flex-shrink: 0; }
+  strong { font-weight: 700; }
+  .retry-btn { /* ... existing styles ... */
+      margin-left: auto; padding: 0.3rem 0.8rem; font-size: 0.85rem; border: 1px solid currentColor;
+      background-color: transparent; color: inherit; border-radius: calc(var(--border-radius) * 0.8);
+      cursor: pointer; transition: background-color 0.2s ease, color 0.2s ease;
+      &:hover { background-color: currentColor; color: var(--card-bg, #fff); }
+  }
+}
+
+// Data Display Wrapper
+.data-display { /* ... */ }
+
+// No Data Message Styling
+.no-data { /* ... existing styles ... */
+    text-align: center; padding: calc(var(--spacing) * 3); color: #6c757d;
+    font-style: italic; min-height: 100px; display: flex; align-items: center; justify-content: center;
+}
+
+// Keyframes for spinning icons
+@keyframes fa-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+
+
+
+
+
+
+
+
+
