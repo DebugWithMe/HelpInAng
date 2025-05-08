@@ -1,3 +1,107 @@
+<ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+  <div class="actuator-container">
+
+    <div class="tabs-wrapper">
+
+      <div class="env-tabs-container">
+          <nav class="env-tabs" aria-label="Environments">
+            <button *ngFor="let env of environments; trackBy: trackByEnv"
+                    class="tab-btn"
+                    [class.active]="env === selectedEnvironment"
+                    (click)="onTabChange(env, selectedView)"
+                    [attr.aria-pressed]="env === selectedEnvironment">
+              {{ env.toUpperCase() }}
+            </button>
+          </nav>
+
+          <button class="refresh-btn" title="Refresh data for {{ selectedEnvironment.toUpperCase() }}"
+                   (click)="refreshCurrentEnvironment()"
+                   [disabled]="isLoading$ | async"> <i class="fas fa-sync" [class.fa-spin]="isLoading$ | async"></i>
+              <span class="refresh-text">Refresh {{ selectedEnvironment.toUpperCase() }}</span>
+           </button>
+      </div> <nav class="endpoint-tabs" aria-label="Actuator Views">
+        <button *ngFor="let tab of displayTabs; trackBy: trackByDisplayTab"
+                class="sub-tab-btn"
+                [class.active]="tab === selectedView"
+                (click)="onTabChange(selectedEnvironment, tab)"
+                [attr.aria-pressed]="tab === selectedView"
+                [class.has-error]="getTabError(currentEnvState, tab)">
+           <i class="fas fa-fw"
+              [ngClass]="{
+                'fa-tachometer-alt': tab === 'overview',
+                'fa-leaf': tab === 'env',
+                'fa-database': tab === 'caches',
+                'fa-question-circle': !displayTabs.includes(tab)
+              }"></i>
+          {{ tab | titlecase }}
+           <i *ngIf="getTabError(currentEnvState, tab)"
+              class="fas fa-exclamation-triangle error-indicator"
+              [title]="getTabError(currentEnvState, tab) ?? 'Error loading data'"></i>
+        </button>
+      </nav>
+    </div> <div class="content-area">
+
+      <div *ngIf="isLoading$ | async" class="loading-container" role="status" aria-live="polite">
+          <div class="spinner"></div>
+          <span>Loading data for {{ selectedEnvironment.toUpperCase() }}...</span>
+      </div>
+
+      <div *ngIf="getGeneralError(currentEnvState) && !(isLoading$ | async)" class="alert alert-danger" role="alert">
+        <i class="fas fa-exclamation-triangle"></i>
+        <strong>Error:</strong> {{ getGeneralError(currentEnvState) }}
+        <button (click)="refreshCurrentEnvironment()" class="retry-btn">Retry</button>
+      </div>
+
+      <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)" class="data-display">
+
+          <app-overview-display
+               *ngIf="selectedView === 'overview'"
+               [healthData]="getHealthData(currentEnvState)"
+               [healthError]="getHealthError(currentEnvState)"
+               [infoData]="getInfoData(currentEnvState)"
+               [infoError]="getInfoError(currentEnvState)"
+               [environment]="selectedEnvironment">
+           </app-overview-display>
+
+          <ng-container *ngIf="selectedView !== 'overview'">
+              <div *ngIf="getErrorForView(currentEnvState, selectedView)" class="alert alert-warning" role="alert">
+                  <i class="fas fa-exclamation-triangle"></i>
+                  <strong>Error loading {{ selectedView }}:</strong> {{ getErrorForView(currentEnvState, selectedView) }}
+              </div>
+              <app-actuator-display
+                   *ngIf="!getErrorForView(currentEnvState, selectedView)"
+                   [data]="getDataForView(currentEnvState, selectedView)"
+                   [endpoint]="selectedView">
+               </app-actuator-display>
+          </ng-container>
+
+      </div>
+
+       <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)">
+            <div *ngIf="selectedView === 'overview' && !getHealthData(currentEnvState) && !getInfoData(currentEnvState) && !getHealthError(currentEnvState) && !getInfoError(currentEnvState) && currentEnvState" class="no-data">
+                 No Health or Info data was returned for {{ selectedEnvironment.toUpperCase() }}.
+            </div>
+             <div *ngIf="selectedView !== 'overview' && !getDataForView(currentEnvState, selectedView) && !getErrorForView(currentEnvState, selectedView) && currentEnvState" class="no-data">
+                  No data was returned for {{ selectedView }} in {{ selectedEnvironment.toUpperCase() }}.
+             </div>
+              <div *ngIf="!currentEnvState" class="no-data"> Data for {{ selectedEnvironment.toUpperCase() }} has not been loaded yet. Click refresh or select the environment again.
+              </div>
+       </div>
+
+    </div> </div> </ng-container> ```
+
+This version correctly reflects the layout changes: no `<header>` section, and the refresh button is now part of the `.env-tabs-container` alongside the environment tabs.
+
+
+
+
+
+
+
+
+
+
+
 <div class="actuator-container">
 
   <div class="tabs-wrapper">
