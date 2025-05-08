@@ -1,0 +1,761 @@
+import { Injectable, OnDestroy } from '@angular/core';
+import { DataFetchService, HealthStatus, InfoData } from './data-fetch.service'; // Assuming interfaces are exported or use 'any'
+import {
+  BehaviorSubject, Observable, Subscription, forkJoin, of
+} from 'rxjs';
+import { map, catchError, finalize, distinctUntilChanged } from 'rxjs/operators';
+
+// --- Interfaces (can be moved to a separate models file) ---
+export interface EnvironmentCacheEntry {
+  timestamp: number; // Date.now() when fetch completed successfully
+  data: { [endpoint: string]: any | null }; // Data keyed by actual endpoint name
+  errors: { [endpoint: string]: string | null }; // Errors keyed by actual endpoint name
+  fetchInProgress: boolean; // Is data currently being fetched for this env?
+  generalError?: string; // An overall error for the last fetch attempt (e.g., all endpoints failed)
+}
+
+export interface ActuatorDataCache {
+  [environment: string]: EnvironmentCacheEntry;
+}
+
+interface EndpointDataResult {
+  endpoint: string; // The actual endpoint fetched (e.g., 'health', 'info')
+  data: any | null;
+  error?: string;
+}
+// --- End Interfaces ---
+
+@Injectable({
+  providedIn: 'root' // Service available application-wide
+})
+export class ActuatorCacheService implements OnDestroy {
+
+  // --- Configuration ---
+  // Actual backend endpoints whose data we need (dependencies for views)
+  private readonly fetchEndpoints: string[] = ['health', 'info', 'env', 'caches'];
+  // Cache invalidation period: 10 minutes * 60 seconds/min * 1000 ms/sec
+  private readonly CACHE_INVALIDATION_MS: number = 10 * 60 * 1000;
+
+  // --- State Management using BehaviorSubjects ---
+  // Holds the entire cache structure state
+  private readonly _cachedData = new BehaviorSubject<ActuatorDataCache>({});
+  // Expose the cache as an observable (read-only)
+  public readonly cachedData$ = this._cachedData.asObservable();
+
+  // Track loading state per environment separately
+  private loadingStates: { [environment: string]: BehaviorSubject<boolean> } = {};
+  // Track active fetch subscriptions per environment to prevent duplicates/allow cancellation
+  private fetchSubscriptions: { [environment: string]: Subscription } = {};
+
+  constructor(private dataService: DataFetchService) { }
+
+  ngOnDestroy(): void {
+    // Clean up all subscriptions when the service is destroyed
+    Object.values(this.fetchSubscriptions).forEach(sub => sub.unsubscribe());
+    // Complete subjects to prevent memory leaks
+    Object.values(this.loadingStates).forEach(subject => subject.complete());
+    this._cachedData.complete();
+  }
+
+  // --- Public API ---
+
+  /**
+   * Gets an Observable that emits the loading state (true/false) for a specific environment.
+   * Emits immediately with the current state and then any subsequent changes.
+   */
+  public getEnvironmentLoadingState(environment: string): Observable<boolean> {
+    this.ensureLoadingSubjectExists(environment); // Ensure subject is created if needed
+    return this.loadingStates[environment].asObservable().pipe(
+        distinctUntilChanged() // Only emit when the value actually changes
+    );
+  }
+
+  /**
+   * Gets an Observable that emits the complete cache entry (data, errors, timestamp, etc.)
+   * for a specific environment whenever it changes. Emits null if no entry exists.
+   */
+  public getEnvironmentState(environment: string): Observable<EnvironmentCacheEntry | null> {
+     return this.cachedData$.pipe(
+         map(cache => cache[environment] || null), // Select the specific environment's entry
+         distinctUntilChanged() // Only emit when the entry object reference changes (or from null to object)
+     );
+  }
+
+  /**
+   * Main method called by components. Ensures data for the specified environment
+   * is loaded if the cache is missing or stale, or if forced.
+   * Updates the public observables with new state.
+   * @param environment The environment key (e.g., 'dev')
+   * @param forceRefresh If true, bypasses cache check and forces fetch.
+   */
+  public loadDataForEnvironment(environment: string, forceRefresh: boolean = false): void {
+    const currentCache = this._cachedData.getValue();
+    const entry = currentCache[environment];
+    const isValid = this.isCacheValid(entry);
+
+    // Exit conditions: valid cache (and not forced), or fetch already in progress
+    if ((!forceRefresh && isValid) || entry?.fetchInProgress) {
+      const reason = entry?.fetchInProgress ? "Fetch in progress" : "Valid cache exists";
+      console.log(`Service: [${environment}] No fetch triggered. Reason: ${reason}.`);
+      // Ensure loading state is correct for observers
+      this.setLoadingState(environment, !!entry?.fetchInProgress);
+      return;
+    }
+
+    // --- Initiate Fetch ---
+    console.log(`Service: [${environment}] Initiating data fetch (Force Refresh: ${forceRefresh})`);
+    this.setLoadingState(environment, true);
+    // Update cache immediately to show fetch is in progress and clear old data/errors
+    this.updateCacheEntry(environment, {
+        timestamp: 0, // Invalidate timestamp
+        data: {},     // Clear old data
+        errors: {},   // Clear old errors
+        fetchInProgress: true,
+        generalError: undefined
+     });
+
+    // Cancel any previous incomplete fetch for this same environment
+    this.fetchSubscriptions[environment]?.unsubscribe();
+
+    // Check if there are any endpoints configured to fetch
+    if (this.fetchEndpoints.length === 0) {
+        console.warn("Service: No fetchEndpoints configured.");
+        this.setLoadingState(environment, false);
+        this.updateCacheEntry(environment, { fetchInProgress: false });
+        return;
+    }
+
+    // Create observables for API calls
+    const dataFetchObservables = this.fetchEndpoints.map(ep =>
+      this.dataService.fetchData(environment, ep).pipe(
+        map(response => ({ endpoint: ep, data: response, error: undefined })),
+        catchError(error => {
+           const message = error.message || `Failed to fetch ${ep}`;
+           console.error(`Service: [${environment}] Error fetching endpoint ${ep}:`, message);
+           return of({ endpoint: ep, data: null, error: message }); // Return error structure on failure
+        })
+      )
+    );
+
+    // Execute calls using forkJoin
+    this.fetchSubscriptions[environment] = forkJoin(dataFetchObservables).subscribe({
+      next: (results: EndpointDataResult[]) => {
+        console.log(`Service: [${environment}] Fetch successful.`);
+        const newData: { [endpoint: string]: any | null } = {};
+        const newErrors: { [endpoint: string]: string | null } = {};
+        let allFailed = true;
+
+        results.forEach(result => {
+          newData[result.endpoint] = result.data;
+          newErrors[result.endpoint] = result.error || null;
+          if (!result.error) allFailed = false;
+        });
+
+        // Update cache with fetched data and new timestamp
+        this.updateCacheEntry(environment, {
+          timestamp: Date.now(),
+          data: newData,
+          errors: newErrors,
+          fetchInProgress: false, // Mark as complete
+          generalError: allFailed ? `Failed to fetch required data for ${environment}.` : undefined
+        });
+        this.setLoadingState(environment, false); // Update loading state
+        delete this.fetchSubscriptions[environment]; // Clean up subscription
+      },
+      error: (err) => { // Should be rare if individual catches work
+         console.error(`Service: [${environment}] Unexpected error in forkJoin:`, err);
+         this.updateCacheEntry(environment, {
+             fetchInProgress: false,
+             generalError: `Unexpected error fetching data: ${err.message || 'Unknown error'}`,
+             timestamp: 0 // Invalidate timestamp on major error
+         });
+         this.setLoadingState(environment, false);
+         delete this.fetchSubscriptions[environment];
+      }
+    });
+  }
+
+   /** Force clears the cache for a specific environment */
+   public clearCacheForEnvironment(environment: string): void {
+      const currentCache = this._cachedData.getValue();
+      if (currentCache[environment]) {
+         // Create a new object excluding the environment to clear
+         const { [environment]: _, ...rest } = currentCache;
+         this._cachedData.next(rest); // Emit updated cache
+         this.loadingStates[environment]?.next(false); // Reset loading state
+         console.log(`Service: Cache cleared for ${environment}`);
+      }
+   }
+
+   /** Force clears the entire cache */
+    public clearAllCache(): void {
+        this._cachedData.next({}); // Emit empty cache
+         Object.keys(this.loadingStates).forEach(env => this.loadingStates[env].next(false));
+        console.log(`Service: All cache cleared`);
+    }
+
+
+  // --- Private Helpers ---
+
+  /** Checks validity based on timestamp */
+  private isCacheValid(entry: EnvironmentCacheEntry | undefined): boolean {
+    if (!entry?.timestamp) return false; // No entry or no valid timestamp
+    const now = Date.now();
+    return (now - entry.timestamp < this.CACHE_INVALIDATION_MS);
+  }
+
+  /** Ensures a BehaviorSubject exists for tracking the loading state */
+  private ensureLoadingSubjectExists(environment: string): void {
+    if (!this.loadingStates[environment]) {
+      this.loadingStates[environment] = new BehaviorSubject<boolean>(false);
+    }
+  }
+
+   /** Updates the loading state subject, only emitting if value changes */
+   private setLoadingState(environment: string, isLoading: boolean): void {
+       this.ensureLoadingSubjectExists(environment);
+       if(this.loadingStates[environment].getValue() !== isLoading) {
+            this.loadingStates[environment].next(isLoading);
+       }
+   }
+
+  /** Helper to update parts of a cache entry and emit the new cache state */
+  private updateCacheEntry(environment: string, updates: Partial<EnvironmentCacheEntry>): void {
+    const currentCache = this._cachedData.getValue();
+    const currentEntry = currentCache[environment] || { // Default empty structure if creating
+        timestamp: 0, data: {}, errors: {}, fetchInProgress: false
+    };
+    const updatedEntry: EnvironmentCacheEntry = { ...currentEntry, ...updates };
+    // Emit a new cache object instance to trigger observable emissions
+    this._cachedData.next({ ...currentCache, [environment]: updatedEntry });
+  }
+}
+
+
+
+
+
+
+
+import { Component, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
+// Import service and interfaces defined within it or separately
+import { ActuatorCacheService, EnvironmentCacheEntry, HealthStatus, InfoData } from '../services/actuator-cache.service';
+import { Observable, Subject } from 'rxjs';
+// Import operators if needed for manual subscriptions (less needed with async pipe)
+// import { takeUntil, map, distinctUntilChanged } from 'rxjs/operators';
+
+@Component({
+  selector: 'app-actuator-data',
+  templateUrl: './actuator-data.component.html',
+  styleUrls: ['./actuator-data.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ActuatorDataComponent implements OnInit, OnDestroy {
+
+  // --- Configuration ---
+  readonly environments: string[] = ['dev', 'e2e', 'ppr', 'prod'];
+  readonly appLogoUrl: string = 'assets/logo.png';
+  readonly displayTabs: string[] = ['overview', 'env', 'caches']; // UI Tabs/Views
+
+  // --- Component State ---
+  selectedEnvironment: string = this.environments[0];
+  selectedView: string = this.displayTabs[0];
+
+  // --- Observables for Template Binding (using async pipe) ---
+  isLoading$: Observable<boolean>; // Tracks loading for the selected environment
+  currentEnvironmentState$: Observable<EnvironmentCacheEntry | null>; // Holds cache entry for selected env
+
+  // Use Subject to automatically unsubscribe ONLY if using manual subscriptions in .ts
+  private destroy$ = new Subject<void>();
+
+  constructor(
+    private cacheService: ActuatorCacheService,
+    private cd: ChangeDetectorRef // Needed for OnPush with async updates sometimes
+  ) {
+    // Initialize observables - these will be reassigned in onTabChange when env changes
+    this.isLoading$ = this.cacheService.getEnvironmentLoadingState(this.selectedEnvironment);
+    this.currentEnvironmentState$ = this.cacheService.getEnvironmentState(this.selectedEnvironment);
+  }
+
+  ngOnInit(): void {
+    // Trigger initial data load check for the default environment via the service
+    this.cacheService.loadDataForEnvironment(this.selectedEnvironment);
+  }
+
+  ngOnDestroy(): void {
+    // Complete the destroy subject if manual subscriptions were used
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  // --- Event Handlers ---
+
+  /** Handles clicks on both environment and view tabs. */
+  onTabChange(env: string, view: string): void {
+    const envChanged = this.selectedEnvironment !== env;
+    const viewChanged = this.selectedView !== view;
+
+    if (envChanged) {
+      this.selectedEnvironment = env;
+      this.selectedView = view; // Update view when environment changes
+
+      // *** Point the component's Observables to the new environment's state ***
+      this.isLoading$ = this.cacheService.getEnvironmentLoadingState(this.selectedEnvironment);
+      this.currentEnvironmentState$ = this.cacheService.getEnvironmentState(this.selectedEnvironment);
+
+      // Request data load for the new environment (service handles caching)
+      this.cacheService.loadDataForEnvironment(this.selectedEnvironment);
+
+      // Important with OnPush when observable references change
+      this.cd.markForCheck();
+    } else if (viewChanged) {
+      // Only the view tab changed, update state
+      this.selectedView = view;
+      // No service call needed. Template re-evaluates based on new selectedView using existing state observable.
+      // No markForCheck typically needed here unless the view change has complex side effects.
+    }
+  }
+
+  /** Forces a data refresh for the currently selected environment via the service. */
+  refreshCurrentEnvironment(): void {
+      console.log(`Component: Manual refresh triggered for ${this.selectedEnvironment}`);
+      this.cacheService.loadDataForEnvironment(this.selectedEnvironment, true);
+  }
+
+  // --- Template Helper Methods ---
+  // These helpers now receive the resolved state object from the async pipe
+  // in the template (`currentEnvState`) and extract needed info.
+
+  getHealthData(state: EnvironmentCacheEntry | null): HealthStatus | null {
+      return state?.data?.['health'] ?? null;
+  }
+  getHealthError(state: EnvironmentCacheEntry | null): string | null {
+      return state?.errors?.['health'] ?? null;
+  }
+  getInfoData(state: EnvironmentCacheEntry | null): InfoData | null {
+       return state?.data?.['info'] ?? null;
+  }
+  getInfoError(state: EnvironmentCacheEntry | null): string | null {
+      return state?.errors?.['info'] ?? null;
+  }
+  // Gets data for non-overview views ('env', 'caches')
+  getDataForView(state: EnvironmentCacheEntry | null, view: string): any | null {
+      if (!state || view === 'overview') return null;
+      return state.data?.[view] ?? null;
+  }
+  // Gets error for non-overview views
+  getErrorForView(state: EnvironmentCacheEntry | null, view: string): string | null {
+      if (!state || view === 'overview') return null;
+      return state.errors?.[view] ?? null;
+  }
+   // Gets combined/specific error for styling tabs
+  getTabError(state: EnvironmentCacheEntry | null, tab: string): string | null {
+       const errors = state?.errors;
+       if (!errors) return null;
+       if (tab === 'overview') {
+           return errors['health'] || errors['info'] || null;
+       } else {
+           return errors[tab] || null;
+       }
+   }
+   // Gets the general error status from the resolved state object
+   getGeneralError(state: EnvironmentCacheEntry | null): string | null {
+        return state?.generalError ?? null;
+   }
+   // Helper to pass the resolved state for "no data" checks if needed
+   getCacheEntry(state: EnvironmentCacheEntry | null): EnvironmentCacheEntry | null {
+       return state;
+   }
+
+
+  // --- TrackBy Functions ---
+  trackByEnv(index: number, env: string): string { return env; }
+  trackByDisplayTab(index: number, tab: string): string { return tab; }
+}
+
+
+
+
+
+
+
+
+
+
+
+<ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+  <div class="actuator-container">
+
+    <header class="actuator-header">
+      <img *ngIf="appLogoUrl" [src]="appLogoUrl" alt="App Logo" class="app-logo">
+      <h1>Actuator Data Viewer</h1>
+      <button class="refresh-btn" title="Refresh data for {{ selectedEnvironment.toUpperCase() }}"
+              (click)="refreshCurrentEnvironment()"
+              [disabled]="isLoading$ | async">
+          <i class="fas fa-sync" [class.fa-spin]="isLoading$ | async"></i>
+          Refresh {{ selectedEnvironment.toUpperCase() }}
+      </button>
+    </header>
+
+    <div class="tabs-wrapper">
+
+      <nav class="env-tabs" aria-label="Environments">
+         <button *ngFor="let env of environments; trackBy: trackByEnv"
+              class="tab-btn"
+              [class.active]="env === selectedEnvironment"
+              (click)="onTabChange(env, selectedView)"
+              [attr.aria-pressed]="env === selectedEnvironment">
+            {{ env.toUpperCase() }}
+          </button>
+      </nav>
+
+      <nav class="endpoint-tabs" aria-label="Actuator Views">
+        <button *ngFor="let tab of displayTabs; trackBy: trackByDisplayTab"
+                class="sub-tab-btn"
+                [class.active]="tab === selectedView"
+                (click)="onTabChange(selectedEnvironment, tab)"
+                [attr.aria-pressed]="tab === selectedView"
+                [class.has-error]="getTabError(currentEnvState, tab)">
+           <i class="fas fa-fw"
+              [ngClass]="{
+                'fa-tachometer-alt': tab === 'overview',
+                'fa-leaf': tab === 'env',
+                'fa-database': tab === 'caches',
+                'fa-question-circle': !displayTabs.includes(tab)
+              }"></i>
+          {{ tab | titlecase }}
+           <i *ngIf="getTabError(currentEnvState, tab)"
+              class="fas fa-exclamation-triangle error-indicator"
+              [title]="getTabError(currentEnvState, tab) ?? 'Error loading data'"></i>
+        </button>
+      </nav>
+    </div>
+
+    <div class="content-area">
+
+      <div *ngIf="isLoading$ | async" class="loading-container" role="status" aria-live="polite">
+          <div class="spinner"></div>
+          <span>Loading data for {{ selectedEnvironment.toUpperCase() }}...</span>
+      </div>
+
+      <div *ngIf="getGeneralError(currentEnvState) && !(isLoading$ | async)" class="alert alert-danger" role="alert">
+        <i class="fas fa-exclamation-triangle"></i>
+        <strong>Error:</strong> {{ getGeneralError(currentEnvState) }}
+        <button (click)="refreshCurrentEnvironment()" class="retry-btn">Retry</button>
+      </div>
+
+      <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)" class="data-display">
+
+          <app-overview-display
+               *ngIf="selectedView === 'overview'"
+               [healthData]="getHealthData(currentEnvState)"
+               [healthError]="getHealthError(currentEnvState)"
+               [infoData]="getInfoData(currentEnvState)"
+               [infoError]="getInfoError(currentEnvState)"
+               [environment]="selectedEnvironment">
+           </app-overview-display>
+
+          <ng-container *ngIf="selectedView !== 'overview'">
+              <div *ngIf="getErrorForView(currentEnvState, selectedView)" class="alert alert-warning" role="alert">
+                  <i class="fas fa-exclamation-triangle"></i>
+                  <strong>Error loading {{ selectedView }}:</strong> {{ getErrorForView(currentEnvState, selectedView) }}
+              </div>
+              <app-actuator-display
+                   *ngIf="!getErrorForView(currentEnvState, selectedView)"
+                   [data]="getDataForView(currentEnvState, selectedView)"
+                   [endpoint]="selectedView">
+               </app-actuator-display>
+          </ng-container>
+
+      </div>
+
+       <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)">
+            <div *ngIf="selectedView === 'overview' && !getHealthData(currentEnvState) && !getInfoData(currentEnvState) && !getHealthError(currentEnvState) && !getInfoError(currentEnvState) && currentEnvState" class="no-data">
+                 No Health or Info data was returned for {{ selectedEnvironment.toUpperCase() }}.
+            </div>
+             <div *ngIf="selectedView !== 'overview' && !getDataForView(currentEnvState, selectedView) && !getErrorForView(currentEnvState, selectedView) && currentEnvState" class="no-data">
+                  No data was returned for {{ selectedView }} in {{ selectedEnvironment.toUpperCase() }}.
+             </div>
+             <div *ngIf="!currentEnvState" class="no-data">
+                  Data for {{ selectedEnvironment.toUpperCase() }} has not been loaded yet. Click refresh or select the environment again.
+              </div>
+       </div>
+
+    </div> </div> </ng-container> ```
+
+---
+**4. `actuator-data.component.scss`**
+---
+(This remains the same as the previous version that included the refresh button styles)
+
+```scss
+// src/app/actuator-data/actuator-data.component.scss
+
+// Define base variables for easier theming
+:host {
+  display: block;
+  --primary-color: #007bff;
+  --primary-color-hover: #0056b3;
+  --text-color-on-primary: #ffffff;
+  --background-color: #f8f9fa;
+  --border-color: #dee2e6;
+  --tab-inactive-bg: #e9ecef;
+  --tab-inactive-text: #495057;
+  --text-color: #212529;
+  --error-color: #dc3545;
+  --error-bg: #f8d7da;
+  --warning-color: #ffc107; // For specific endpoint errors maybe
+  --warning-bg: #fff3cd;
+  --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  --border-radius: 6px;
+  --spacing: 1rem;
+}
+
+// Main container styling
+.actuator-container {
+  font-family: var(--font-family);
+  color: var(--text-color);
+  background-color: var(--background-color);
+  min-height: 100vh;
+  padding: var(--spacing);
+}
+
+// Header Styling
+.actuator-header {
+  display: flex;
+  align-items: center;
+  padding-bottom: var(--spacing);
+  margin-bottom: var(--spacing);
+  border-bottom: 1px solid var(--border-color);
+  gap: 1rem; // Space between items in header
+
+  .app-logo {
+    height: 40px;
+    margin-right: 0; // Use gap instead
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 1.75rem;
+    font-weight: 600;
+    color: var(--primary-color); // Use primary color for title
+    flex-grow: 1; // Allow title to take space
+  }
+
+  // Refresh Button Styling
+  .refresh-btn {
+    // Remove margin-left: auto; use gap from flex container
+    padding: 0.4rem 0.9rem;
+    font-size: 0.9rem;
+    border: 1px solid var(--primary-color);
+    background-color: #fff;
+    color: var(--primary-color);
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    white-space: nowrap; // Prevent wrapping
+
+    &:hover:not(:disabled) {
+        background-color: var(--primary-color);
+        color: #fff;
+    }
+
+    &:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        border-color: #ccc;
+        color: #666;
+        background-color: #f8f9fa;
+    }
+
+    // Ensure spin animation is defined and applied
+    .fa-spin {
+        animation: fa-spin 1.5s linear infinite;
+    }
+  }
+}
+
+// Tabs Styling
+.tabs-wrapper {
+  margin-bottom: calc(var(--spacing) * 1.5); // Use calc()
+}
+
+.env-tabs, .endpoint-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem; // Spacing between buttons
+  margin-bottom: var(--spacing);
+  padding-bottom: var(--spacing);
+  border-bottom: 1px solid var(--border-color);
+
+  &:last-child {
+    margin-bottom: 0;
+    border-bottom: none;
+  }
+}
+
+// General Button Styles for Tabs
+.tab-btn, .sub-tab-btn {
+  padding: 0.6rem 1.2rem;
+  border: 1px solid transparent;
+  background-color: var(--tab-inactive-bg);
+  color: var(--tab-inactive-text);
+  cursor: pointer;
+  border-radius: var(--border-radius);
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-align: center;
+  display: inline-flex; // Align icon and text
+  align-items: center;
+  gap: 0.4em;
+  position: relative; // For error indicator positioning if needed
+
+  i.fas { // Base icon styling
+     // margin-right: 0.4em; // Use gap instead
+  }
+
+  &:hover:not(.active) { // Don't change bg on hover if already active
+    background-color: color-mix(in srgb, var(--tab-inactive-bg) 80%, black);
+    border-color: color-mix(in srgb, var(--tab-inactive-bg) 70%, black);
+  }
+
+  &.active {
+    background-color: var(--primary-color);
+    color: var(--text-color-on-primary);
+    border-color: var(--primary-color-hover);
+    font-weight: 700;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+
+  // Error styling for tabs
+  &.has-error {
+    // Example: Add subtle indicator without changing text color too much
+    border-left: 4px solid var(--error-color);
+    // Optionally change background or text, but be careful with contrast/theme
+    // background-color: color-mix(in srgb, var(--error-bg) 80%, var(--tab-inactive-bg));
+  }
+
+  .error-indicator {
+    color: var(--error-color);
+    // margin-left: 0.5em; // Use gap from flex
+    font-size: 0.9em;
+    // Optional absolute positioning if needed:
+    // position: absolute; top: 2px; right: 4px;
+  }
+}
+
+// Content Area Styling
+.content-area {
+  background-color: #ffffff;
+  border-radius: var(--border-radius);
+  padding: calc(var(--spacing) * 1.5); // Use calc()
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  min-height: 300px;
+  position: relative; // For spinner positioning
+}
+
+// Loading Spinner Styling
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--spacing) * 2); // Use calc()
+  color: #555;
+  font-weight: 600;
+  position: absolute; // Center overlay
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: rgba(255, 255, 255, 0.85); // Slightly more opaque overlay
+  z-index: 10;
+  border-radius: var(--border-radius); // Match content area radius
+
+  .spinner {
+    border: 4px solid #f3f3f3; /* Light grey */
+    border-top: 4px solid var(--primary-color); /* Blue */
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: fa-spin 1s linear infinite; // Use same spin animation
+    margin-bottom: var(--spacing);
+  }
+
+  span {
+      font-size: 1rem;
+  }
+}
+
+// Alert Box Styling (General)
+.alert {
+  padding: var(--spacing);
+  margin-bottom: var(--spacing);
+  border: 1px solid transparent;
+  border-radius: var(--border-radius);
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+
+  &.alert-danger { // For general env errors
+    color: var(--error-color);
+    background-color: var(--error-bg);
+    border-color: color-mix(in srgb, var(--error-bg) 80%, black);
+  }
+
+   &.alert-warning { // For specific view errors
+    color: #664d03;
+    background-color: var(--warning-bg);
+    border-color: #ffecb5;
+  }
+
+  i.fas { // Icon in alert
+    font-size: 1.2em;
+    flex-shrink: 0; // Prevent icon from shrinking
+  }
+
+  strong { // Make prefix bold
+      font-weight: 700;
+  }
+
+  .retry-btn { // Style for retry button inside alerts
+      margin-left: auto; // Push retry button to the right
+      padding: 0.3rem 0.8rem;
+      font-size: 0.85rem;
+      border: 1px solid currentColor; // Use alert text color for border
+      background-color: transparent;
+      color: inherit; // Use alert text color
+      border-radius: calc(var(--border-radius) * 0.8);
+      cursor: pointer;
+      transition: background-color 0.2s ease, color 0.2s ease;
+
+      &:hover {
+          background-color: currentColor; // Use alert text color as bg on hover
+          color: var(--card-bg, #fff); // Use card bg (likely white) for text on hover
+      }
+  }
+}
+
+// Data Display Wrapper
+.data-display {
+  // Add styles if needed to wrap the child components
+}
+
+// No Data Message Styling
+.no-data {
+    text-align: center;
+    padding: calc(var(--spacing) * 3); // Use calc()
+    color: #6c757d;
+    font-style: italic;
+    min-height: 100px; // Give it some space
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+// Keyframes for spinning icons
+@keyframes fa-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
