@@ -1,0 +1,488 @@
+// cache service
+
+import { Injectable, OnDestroy } from '@angular/core';
+import { HttpErrorResponse } from '@angular/common/http'; // <<< IMPORTANT: Import this
+import { DataFetchService, HealthStatus, InfoData } from './data-fetch.service';
+import {
+  BehaviorSubject, Observable, Subscription, forkJoin, of
+} from 'rxjs';
+import { map, catchError, distinctUntilChanged } from 'rxjs/operators';
+
+// --- Interfaces ---
+export interface ErrorPayload { // Export if used by components directly
+  message: string;
+  httpStatusCode?: number;
+}
+
+export interface EndpointDataResult {
+  endpoint: string;
+  data: any | null;
+  error?: ErrorPayload | null; // Updated to use ErrorPayload
+}
+
+export interface EnvironmentCacheEntry {
+  timestamp: number;
+  data: { [endpoint: string]: any | null };
+  errors: { [endpoint: string]: ErrorPayload | null }; // Updated to use ErrorPayload
+  fetchInProgress: boolean;
+  generalError?: string;
+}
+
+export interface ActuatorDataCache {
+  [environment: string]: EnvironmentCacheEntry;
+}
+// --- End Interfaces ---
+
+@Injectable({
+  providedIn: 'root'
+})
+export class ActuatorCacheService implements OnDestroy {
+  private readonly fetchEndpoints: string[] = ['health', 'info', 'env', 'caches'];
+  private readonly CACHE_INVALIDATION_MS: number = 10 * 60 * 1000;
+  private readonly _cachedData = new BehaviorSubject<ActuatorDataCache>({});
+  public readonly cachedData$ = this._cachedData.asObservable();
+  private loadingStates: { [environment: string]: BehaviorSubject<boolean> } = {};
+  private fetchSubscriptions: { [environment: string]: Subscription } = {};
+
+  constructor(private dataService: DataFetchService) { }
+
+  ngOnDestroy(): void {
+    Object.values(this.fetchSubscriptions).forEach(sub => sub.unsubscribe());
+    Object.values(this.loadingStates).forEach(subject => subject.complete());
+    this._cachedData.complete();
+  }
+
+  public getEnvironmentLoadingState(environment: string): Observable<boolean> {
+    this.ensureLoadingSubjectExists(environment);
+    return this.loadingStates[environment].asObservable().pipe(distinctUntilChanged());
+  }
+
+  public getEnvironmentState(environment: string): Observable<EnvironmentCacheEntry | null> {
+     return this.cachedData$.pipe(
+         map(cache => cache[environment] || null),
+         distinctUntilChanged()
+     );
+  }
+
+  public loadDataForEnvironment(environment: string, forceRefresh: boolean = false): void {
+    const currentCache = this._cachedData.getValue();
+    const entry = currentCache[environment];
+    const isValid = this.isCacheValid(entry);
+
+    if ((!forceRefresh && isValid) || entry?.fetchInProgress) {
+      // ... (logging as before) ...
+      this.setLoadingState(environment, !!entry?.fetchInProgress);
+      return;
+    }
+
+    console.log(`Service: [${environment}] Initiating data fetch (Force Refresh: ${forceRefresh})`);
+    this.setLoadingState(environment, true);
+    this.updateCacheEntry(environment, {
+        timestamp: 0, data: {}, errors: {}, fetchInProgress: true, generalError: undefined
+     });
+
+    this.fetchSubscriptions[environment]?.unsubscribe();
+    if (this.fetchEndpoints.length === 0) { /* ... */ return; }
+
+    const dataFetchObservables: Observable<EndpointDataResult>[] = this.fetchEndpoints.map(ep =>
+      this.dataService.fetchData(environment, ep).pipe(
+        map(response => ({ endpoint: ep, data: response, error: null })),
+        // ***** MODIFIED CATCHERROR *****
+        catchError((error: any) => {
+           let httpStatusCode: number | undefined;
+           let message: string;
+
+           if (error instanceof HttpErrorResponse) { // Check if it's an HttpErrorResponse
+             httpStatusCode = error.status;
+             message = `HTTP ${error.status || 'Error'}: ${error.statusText || (typeof error.error === 'string' && error.error.length < 100 ? error.error : error.message) || 'Server error'}`;
+           } else {
+             message = error.message || `Failed to fetch ${ep}`;
+           }
+           console.error(`Service: [${environment}] Error fetching endpoint ${ep} (HTTP ${httpStatusCode || 'N/A'}):`, message, error);
+           return of({ endpoint: ep, data: null, error: { message, httpStatusCode } }); // Return ErrorPayload
+        })
+        // ***** END OF MODIFIED CATCHERROR *****
+      )
+    );
+
+    this.fetchSubscriptions[environment] = forkJoin(dataFetchObservables).subscribe({
+      next: (results: EndpointDataResult[]) => {
+        const newData: { [endpoint: string]: any | null } = {};
+        // Ensure this type matches the updated EndpointDataResult.error type
+        const newErrors: { [endpoint: string]: ErrorPayload | null } = {};
+        let allFailed = true;
+
+        results.forEach(result => {
+          newData[result.endpoint] = result.data;
+          newErrors[result.endpoint] = result.error || null; // result.error is now ErrorPayload or null
+          if (!result.error) allFailed = false;
+        });
+
+        this.updateCacheEntry(environment, {
+          timestamp: Date.now(), data: newData, errors: newErrors,
+          fetchInProgress: false,
+          generalError: allFailed ? `Failed to fetch required data for ${environment}.` : undefined
+        });
+        this.setLoadingState(environment, false);
+        delete this.fetchSubscriptions[environment];
+      },
+      error: (err) => { /* ... fallback error handling as before ... */ }
+    });
+  }
+
+  private isCacheValid(entry: EnvironmentCacheEntry | undefined): boolean { /* ... as before ... */
+    if (!entry?.timestamp) return false;
+    const now = Date.now();
+    return (now - entry.timestamp < this.CACHE_INVALIDATION_MS);
+  }
+
+  private ensureLoadingSubjectExists(environment: string): void { /* ... as before ... */
+    if (!this.loadingStates[environment]) {
+      this.loadingStates[environment] = new BehaviorSubject<boolean>(false);
+    }
+  }
+
+  private setLoadingState(environment: string, isLoading: boolean): void { /* ... as before ... */
+      this.ensureLoadingSubjectExists(environment);
+      if(this.loadingStates[environment].getValue() !== isLoading) {
+           this.loadingStates[environment].next(isLoading);
+      }
+  }
+
+  private updateCacheEntry(environment: string, updates: Partial<EnvironmentCacheEntry>): void { /* ... as before ... */
+    const currentCache = this._cachedData.getValue();
+    const currentEntry = currentCache[environment] || {
+        timestamp: 0, data: {}, errors: {}, fetchInProgress: false
+    };
+    const updatedEntry: EnvironmentCacheEntry = { ...currentEntry, ...updates };
+    this._cachedData.next({ ...currentCache, [environment]: updatedEntry });
+  }
+  // ... clearCache methods if you have them ...
+}
+
+
+
+
+
+
+
+
+
+// actuator monitor ts
+import { Component, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
+// Import ErrorPayload from the service or a shared models file
+import { ActuatorCacheService, EnvironmentCacheEntry, HealthStatus, InfoData, ErrorPayload } from '../services/actuator-cache.service';
+import { Observable, Subject } from 'rxjs';
+
+@Component({
+  selector: 'app-actuator-data',
+  templateUrl: './actuator-data.component.html',
+  styleUrls: ['./actuator-data.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class ActuatorDataComponent implements OnInit, OnDestroy {
+  readonly environments: string[] = ['dev', 'e2e', 'ppr', 'prod'];
+  readonly appLogoUrl: string = 'assets/logo.png';
+  readonly displayTabs: string[] = ['overview', 'env', 'caches'];
+
+  selectedEnvironment: string = this.environments[0];
+  selectedView: string = this.displayTabs[0];
+
+  isLoading$: Observable<boolean>;
+  currentEnvironmentState$: Observable<EnvironmentCacheEntry | null>;
+
+  private destroy$ = new Subject<void>();
+
+  constructor(
+    private cacheService: ActuatorCacheService,
+    private cd: ChangeDetectorRef
+  ) {
+    this.isLoading$ = this.cacheService.getEnvironmentLoadingState(this.selectedEnvironment);
+    this.currentEnvironmentState$ = this.cacheService.getEnvironmentState(this.selectedEnvironment);
+  }
+
+  ngOnInit(): void {
+    this.cacheService.loadDataForEnvironment(this.selectedEnvironment);
+  }
+
+  ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
+  }
+
+  onTabChange(env: string, view: string): void {
+    // ... (same as previous version, re-assigns isLoading$ and currentEnvironmentState$) ...
+    const envChanged = this.selectedEnvironment !== env;
+    const viewChanged = this.selectedView !== view;
+
+    if (envChanged) {
+      this.selectedEnvironment = env;
+      this.selectedView = view;
+      this.isLoading$ = this.cacheService.getEnvironmentLoadingState(this.selectedEnvironment);
+      this.currentEnvironmentState$ = this.cacheService.getEnvironmentState(this.selectedEnvironment);
+      this.cacheService.loadDataForEnvironment(this.selectedEnvironment);
+      this.cd.markForCheck();
+    } else if (viewChanged) {
+      this.selectedView = view;
+    }
+  }
+
+  refreshCurrentEnvironment(): void {
+      this.cacheService.loadDataForEnvironment(this.selectedEnvironment, true);
+  }
+
+  // --- Template Helper Methods ---
+  getHealthData(state: EnvironmentCacheEntry | null): HealthStatus | null {
+      return state?.data?.['health'] ?? null;
+  }
+  // *** Returns ErrorPayload or null ***
+  getHealthError(state: EnvironmentCacheEntry | null): ErrorPayload | null {
+      return state?.errors?.['health'] ?? null;
+  }
+  getInfoData(state: EnvironmentCacheEntry | null): InfoData | null {
+       return state?.data?.['info'] ?? null;
+  }
+  // *** Returns ErrorPayload or null ***
+  getInfoError(state: EnvironmentCacheEntry | null): ErrorPayload | null {
+      return state?.errors?.['info'] ?? null;
+  }
+  getDataForView(state: EnvironmentCacheEntry | null, view: string): any | null {
+      if (!state || view === 'overview') return null;
+      return state.data?.[view] ?? null;
+  }
+  // *** Returns ErrorPayload or null for individual views ***
+  getErrorForView(state: EnvironmentCacheEntry | null, view: string): ErrorPayload | null {
+      if (!state || view === 'overview') return null;
+      return state.errors?.[view] ?? null;
+  }
+  // *** getTabError should return the message string for the title attribute ***
+  getTabError(state: EnvironmentCacheEntry | null, tab: string): string | null {
+       const errors = state?.errors;
+       if (!errors) return null;
+       let relevantError: ErrorPayload | null = null;
+       if (tab === 'overview') {
+           relevantError = errors['health'] || errors['info'] || null;
+       } else {
+           relevantError = errors[tab] || null;
+       }
+       return relevantError?.message || null; // Return message part for title
+   }
+   getGeneralError(state: EnvironmentCacheEntry | null): string | null {
+        return state?.generalError ?? null;
+   }
+   getCacheEntry(state: EnvironmentCacheEntry | null): EnvironmentCacheEntry | null {
+       return state;
+   }
+
+  trackByEnv(index: number, env: string): string { return env; }
+  trackByDisplayTab(index: number, tab: string): string { return tab; }
+}
+
+
+
+
+
+
+
+
+
+
+
+// overview ts
+import { Component, Input, ChangeDetectionStrategy } from '@angular/core';
+import { HealthStatus, InfoData } from '../services/data-fetch.service'; // Or from shared models
+// Assuming ErrorPayload is also defined/imported here if from shared models
+// For this example, let's redefine it if not globally available or imported from cache service
+export interface ErrorPayload { message: string; httpStatusCode?: number; }
+
+
+@Component({
+  selector: 'app-overview-display',
+  templateUrl: './overview-display.component.html',
+  styleUrls: ['./overview-display.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class OverviewDisplayComponent {
+  @Input() healthData: HealthStatus | null = null;
+  @Input() healthError: ErrorPayload | null = null; // Expects ErrorPayload
+  @Input() infoData: InfoData | null = null;
+  @Input() infoError: ErrorPayload | null = null;   // Expects ErrorPayload
+  @Input() environment: string = '';
+
+  private getEffectiveHealthStatus(): string {
+    if (this.healthError) {
+      if (this.healthError.httpStatusCode) {
+        const code = this.healthError.httpStatusCode;
+        if (code === 503) return 'OUT_OF_SERVICE';
+        if (code === 500) return 'DOWN';
+        if (code >= 500 && code <= 599) return 'UNKNOWN';
+        if (code >= 400 && code <= 499) return 'UNKNOWN';
+        if (code >= 300 && code <= 399) return 'UNKNOWN';
+        return 'UNKNOWN';
+      }
+      return 'DOWN'; // Non-HTTP errors, connection refused etc.
+    }
+    return this.healthData?.status?.toUpperCase() || 'UNKNOWN';
+  }
+
+  getHealthStatusClass(): string {
+    const effectiveStatus = this.getEffectiveHealthStatus();
+    // ... (switch logic as defined previously)
+    switch (effectiveStatus) {
+      case 'UP': return 'status-up';
+      case 'DOWN': return 'status-down';
+      case 'OUT_OF_SERVICE': return 'status-warning';
+      case 'UNKNOWN': return 'status-unknown';
+      default: return 'status-unknown';
+    }
+  }
+
+  getHealthStatusIcon(): string {
+    const effectiveStatus = this.getEffectiveHealthStatus();
+    // ... (switch logic as defined previously)
+    switch (effectiveStatus) {
+      case 'UP': return 'fa-check-circle';
+      case 'DOWN': return 'fa-times-circle';
+      case 'OUT_OF_SERVICE': return 'fa-exclamation-triangle';
+      case 'UNKNOWN': return 'fa-question-circle';
+      default: return 'fa-question-circle';
+    }
+  }
+
+  getOverallHealthStatusText(): string {
+    return this.getEffectiveHealthStatus();
+  }
+
+  getHealthComponents(status: HealthStatus | null): { key: string, value: HealthStatus }[] {
+    if (this.healthError || !status?.components) return [];
+    return Object.entries(status.components)
+                 .map(([key, value]) => ({ key, value }))
+                 .sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  // ... (getObjectKeys, formatSimpleValue, isSimpleObject, trackBy functions as before) ...
+  getObjectKeys(obj: any): string[] { return typeof obj === 'object' && obj !== null && !Array.isArray(obj) ? Object.keys(obj).sort() : []; }
+  formatSimpleValue(value: any): string { if (value === null || value === undefined) return 'N/A'; if (Array.isArray(value)) return value.join(', '); return String(value); }
+  isSimpleObject(value: any): boolean { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+  trackByKey(index: number, item: { key: string }): string { return item.key; }
+  trackByString(index: number, item: string): string { return item; }
+}
+
+
+
+
+
+
+
+// overview html
+<div class="overview-container">
+  <h3 class="overview-title">Overview for {{ environment.toUpperCase() }} Environment</h3>
+  <div class="overview-grid">
+
+    <section class="health-section card">
+      <header class="card-header">
+        <i class="fas fa-heartbeat icon"></i> Health Status
+      </header>
+      <div class="card-body">
+        <div *ngIf="healthError" class="alert alert-warning health-fetch-error">
+          <i class="fas fa-exclamation-triangle"></i>
+          Fetch Error: {{ healthError.message }}
+          <span *ngIf="healthError.httpStatusCode"> (HTTP {{ healthError.httpStatusCode }})</span>
+        </div>
+        <div *ngIf="healthData || healthError" class="health-status-wrapper">
+          <div class="overall-status-badge" [ngClass]="getHealthStatusClass()">
+              <i class="fas fa-fw status-icon" [ngClass]="getHealthStatusIcon()"></i>
+              <span class="status-text">{{ getOverallHealthStatusText() }}</span>
+          </div>
+        </div>
+        <div *ngIf="!healthError && healthData">
+            <div *ngIf="getHealthComponents(healthData).length > 0" class="components-table-wrapper">
+              <h4>Components</h4>
+              <table class="styled-table health-components-table">
+                <thead><tr><th>Component Name</th><th>Status</th><th>Details</th></tr></thead>
+                 <tbody>
+                   <tr *ngFor="let comp of getHealthComponents(healthData); trackBy: trackByKey">
+                     <td class="component-key"><strong>{{ comp.key }}</strong></td>
+                     <td>
+                       <span class="status-badge" [ngClass]="getHealthStatusClass(comp.value.status)">
+                         <i class="fas fa-fw" [ngClass]="getHealthStatusIcon(comp.value.status)"></i>
+                         {{ comp.value.status || 'UNKNOWN' }}
+                       </span>
+                     </td>
+                     <td>
+                       <ng-container *ngIf="isSimpleObject(comp.value.details) && getObjectKeys(comp.value.details).length < 4 && getObjectKeys(comp.value.details).length > 0; else detailsPre">
+                           <ul class="details-list">
+                               <li *ngFor="let detailKey of getObjectKeys(comp.value.details); trackBy: trackByString">
+                                   <strong>{{ detailKey }}:</strong> {{ formatSimpleValue(comp.value.details[detailKey]) }}
+                               </li>
+                           </ul>
+                       </ng-container>
+                       <ng-template #detailsPre>
+                           <pre *ngIf="comp.value.details">{{ comp.value.details | json }}</pre>
+                           <span *ngIf="!comp.value.details">-</span>
+                       </ng-template>
+                     </td>
+                   </tr>
+                 </tbody>
+              </table>
+            </div>
+            <div *ngIf="getHealthComponents(healthData).length === 0 && !healthError" class="no-details">
+               <p>No detailed health components reported.</p>
+            </div>
+        </div>
+         <div *ngIf="!healthError && !healthData" class="no-details">
+            <p>Health data not available.</p>
+         </div>
+      </div>
+    </section>
+
+    <section class="info-section card">
+      <header class="card-header">
+        <i class="fas fa-info-circle icon"></i> Application Info
+      </header>
+      <div class="card-body">
+        <div *ngIf="infoError" class="alert alert-warning">
+           <i class="fas fa-exclamation-triangle"></i> Could not load info data: {{ infoError.message }}
+           <span *ngIf="infoError.httpStatusCode"> (HTTP {{ infoError.httpStatusCode }})</span>
+        </div>
+        <div *ngIf="!infoError && infoData" class="info-content">
+            <table class="styled-table info-table" *ngIf="getObjectKeys(infoData).length > 0; else noInfoKeys">
+                <thead><tr><th>Property</th><th>Value</th></tr></thead>
+                <tbody>
+                    <tr *ngFor="let infoKey of getObjectKeys(infoData); trackBy: trackByString">
+                        <td><strong>{{ infoKey }}</strong></td>
+                        <td><app-json-viewer-node [data]="infoData[infoKey]"></app-json-viewer-node></td>
+                    </tr>
+                </tbody>
+            </table>
+             <ng-template #noInfoKeys><p class="no-details">Info endpoint returned no data.</p></ng-template>
+        </div>
+         <div *ngIf="!infoError && !infoData"><p class="no-details">Info data not available.</p></div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+
+
+
+
+
+//monitor html
+
+<ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+    <div *ngIf="selectedView !== 'overview'"> <div *ngIf="getErrorForView(currentEnvState, selectedView) as viewError" class="alert alert-warning" role="alert">
+            <i class="fas fa-exclamation-triangle"></i>
+            <strong>Error loading {{ selectedView }}:</strong> {{ viewError.message }}
+            <span *ngIf="viewError.httpStatusCode"> (HTTP {{ viewError.httpStatusCode }})</span>
+        </div>
+        <app-actuator-display
+            *ngIf="!getErrorForView(currentEnvState, selectedView)"
+            [data]="getDataForView(currentEnvState, selectedView)"
+            [endpoint]="selectedView">
+        </app-actuator-display>
+    </div>
+</ng-container>
+
+
