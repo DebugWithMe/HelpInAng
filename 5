@@ -1,0 +1,174 @@
+// src/app/overview-display/overview-display.component.ts
+import { Component, Input, ChangeDetectionStrategy } from '@angular/core';
+import { HealthStatus, InfoData } from '../services/data-fetch.service'; // Or from shared models
+
+export interface ErrorPayload { message: string; httpStatusCode?: number; }
+
+@Component({
+  selector: 'app-overview-display',
+  templateUrl: './overview-display.component.html',
+  styleUrls: ['./overview-display.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush
+})
+export class OverviewDisplayComponent {
+  @Input() healthData: HealthStatus | null = null;
+  @Input() healthError: ErrorPayload | null = null;
+  @Input() infoData: InfoData | null = null;
+  @Input() infoError: ErrorPayload | null = null;
+  @Input() environment: string = '';
+
+  // --- For OVERALL Health Status (uses component properties) ---
+  private getEffectiveHealthStatus(): string {
+    if (this.healthError) {
+      if (this.healthError.httpStatusCode) {
+        const code = this.healthError.httpStatusCode;
+        if (code === 503) return 'OUT_OF_SERVICE';
+        if (code === 500) return 'DOWN';
+        if (code >= 500 && code <= 599) return 'UNKNOWN';
+        if (code >= 400 && code <= 499) return 'UNKNOWN';
+        if (code >= 300 && code <= 399) return 'UNKNOWN';
+        return 'UNKNOWN';
+      }
+      return 'DOWN';
+    }
+    return this.healthData?.status?.toUpperCase() || 'UNKNOWN';
+  }
+
+  // Renamed: For the main overall health badge
+  getOverallHealthStatusClass(): string {
+    const effectiveStatus = this.getEffectiveHealthStatus();
+    switch (effectiveStatus) {
+      case 'UP': return 'status-up';
+      case 'DOWN': return 'status-down';
+      case 'OUT_OF_SERVICE': return 'status-warning';
+      case 'UNKNOWN': return 'status-unknown';
+      default: return 'status-unknown';
+    }
+  }
+
+  // Renamed: For the main overall health badge
+  getOverallHealthStatusIcon(): string {
+    const effectiveStatus = this.getEffectiveHealthStatus();
+    switch (effectiveStatus) {
+      case 'UP': return 'fa-check-circle';
+      case 'DOWN': return 'fa-times-circle';
+      case 'OUT_OF_SERVICE': return 'fa-exclamation-triangle';
+      case 'UNKNOWN': return 'fa-question-circle';
+      default: return 'fa-question-circle';
+    }
+  }
+
+  getOverallHealthStatusText(): string {
+    return this.getEffectiveHealthStatus();
+  }
+
+  // --- For INDIVIDUAL Component Health Status (take status as argument) ---
+  getComponentHealthStatusClass(status: string | undefined): string {
+    switch (status?.toUpperCase()) {
+      case 'UP': return 'status-up';
+      case 'DOWN': return 'status-down';
+      case 'OUT_OF_SERVICE': return 'status-warning';
+      case 'UNKNOWN': return 'status-unknown';
+      default: return 'status-unknown';
+    }
+  }
+
+  getComponentHealthStatusIcon(status: string | undefined): string {
+    switch (status?.toUpperCase()) {
+      case 'UP': return 'fa-check-circle';
+      case 'DOWN': return 'fa-times-circle';
+      case 'OUT_OF_SERVICE': return 'fa-exclamation-triangle';
+      case 'UNKNOWN': return 'fa-question-circle';
+      default: return 'fa-question-circle';
+    }
+  }
+
+  // getHealthComponents logic remains the same
+  getHealthComponents(status: HealthStatus | null): { key: string, value: HealthStatus }[] {
+    if (this.healthError || !status?.components) return [];
+    return Object.entries(status.components)
+                 .map(([key, value]) => ({ key, value }))
+                 .sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  // ... (other existing helpers: getObjectKeys, formatSimpleValue, isSimpleObject, trackBy functions) ...
+  getObjectKeys(obj: any): string[] { return typeof obj === 'object' && obj !== null && !Array.isArray(obj) ? Object.keys(obj).sort() : []; }
+  formatSimpleValue(value: any): string { if (value === null || value === undefined) return 'N/A'; if (Array.isArray(value)) return value.join(', '); return String(value); }
+  isSimpleObject(value: any): boolean { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+  trackByKey(index: number, item: { key: string }): string { return item.key; }
+  trackByString(index: number, item: string): string { return item; }
+}
+
+
+
+
+
+<div class="overview-container">
+  <h3 class="overview-title">Overview for {{ environment.toUpperCase() }} Environment</h3>
+  <div class="overview-grid">
+
+    <section class="health-section card">
+      <header class="card-header">
+        <i class="fas fa-heartbeat icon"></i> Health Status
+      </header>
+      <div class="card-body">
+        <div *ngIf="healthError" class="alert alert-warning health-fetch-error">
+          <i class="fas fa-exclamation-triangle"></i>
+          Fetch Error: {{ healthError.message }}
+          <span *ngIf="healthError.httpStatusCode"> (HTTP {{ healthError.httpStatusCode }})</span>
+        </div>
+
+        <div *ngIf="healthData || healthError" class="health-status-wrapper">
+          <div class="overall-status-badge" [ngClass]="getOverallHealthStatusClass()">
+              <i class="fas fa-fw status-icon" [ngClass]="getOverallHealthStatusIcon()"></i>
+              <span class="status-text">{{ getOverallHealthStatusText() }}</span>
+          </div>
+        </div>
+
+        <div *ngIf="!healthError && healthData">
+            <div *ngIf="getHealthComponents(healthData).length > 0" class="components-table-wrapper">
+              <h4>Components</h4>
+              <table class="styled-table health-components-table">
+                <thead><tr><th>Component Name</th><th>Status</th><th>Details</th></tr></thead>
+                <tbody>
+                  <tr *ngFor="let comp of getHealthComponents(healthData); trackBy: trackByKey">
+                    <td class="component-key"><strong>{{ comp.key }}</strong></td>
+                    <td>
+                      <span class="status-badge" [ngClass]="getComponentHealthStatusClass(comp.value.status)">
+                        <i class="fas fa-fw" [ngClass]="getComponentHealthStatusIcon(comp.value.status)"></i>
+                        {{ comp.value.status || 'UNKNOWN' }}
+                      </span>
+                    </td>
+                    <td>
+                      <ng-container *ngIf="isSimpleObject(comp.value.details) && getObjectKeys(comp.value.details).length < 4 && getObjectKeys(comp.value.details).length > 0; else detailsPre">
+                          <ul class="details-list">
+                              <li *ngFor="let detailKey of getObjectKeys(comp.value.details); trackBy: trackByString">
+                                  <strong>{{ detailKey }}:</strong> {{ formatSimpleValue(comp.value.details[detailKey]) }}
+                              </li>
+                          </ul>
+                      </ng-container>
+                      <ng-template #detailsPre>
+                          <pre *ngIf="comp.value.details">{{ comp.value.details | json }}</pre>
+                          <span *ngIf="!comp.value.details">-</span>
+                      </ng-template>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div *ngIf="getHealthComponents(healthData).length === 0 && !healthError" class="no-details">
+               <p>No detailed health components reported.</p>
+            </div>
+        </div>
+         <div *ngIf="!healthError && !healthData" class="no-details">
+            <p>Health data not available.</p>
+         </div>
+      </div>
+    </section>
+
+    <section class="info-section card">
+      </section>
+
+  </div>
+</div>
+
