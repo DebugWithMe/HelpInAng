@@ -1,0 +1,95 @@
+// src/app/services/actuator-cache.service.ts
+
+// ... (imports and interface definitions as before)
+// Ensure these interfaces are correct:
+// export interface ErrorPayload { message: string; httpStatusCode?: number; }
+// export interface EndpointDataResult { endpoint: string; data: any | null; error?: ErrorPayload | null; }
+// export interface EnvironmentCacheEntry {
+//   timestamp: number;
+//   data: { [endpoint: string]: any | null };
+//   errors: { [endpoint: string]: ErrorPayload | null }; // <<<< This should expect ErrorPayload
+//   fetchInProgress: boolean;
+//   generalError?: string;
+// }
+
+@Injectable({ /* ... */ })
+export class ActuatorCacheService implements OnDestroy {
+  // ... (other properties and methods) ...
+
+  public loadDataForEnvironment(environment: string, forceRefresh: boolean = false): void {
+    // ... (cache checks, setting loading states, etc. as before) ...
+
+    const dataFetchObservables: Observable<EndpointDataResult>[] = this.fetchEndpoints.map(ep =>
+      this.dataService.fetchData(environment, ep).pipe(
+        map(response => ({ endpoint: ep, data: response, error: null })),
+        catchError((error: any) => {
+           let httpStatusCode: number | undefined;
+           let message: string;
+           if (error instanceof HttpErrorResponse) {
+             httpStatusCode = error.status;
+             message = `HTTP ${error.status || 'Error'}: ${error.statusText || (typeof error.error === 'string' && error.error.length < 100 ? error.error : error.message) || 'Server error'}`;
+           } else {
+             message = error.message || `Failed to fetch ${ep}`;
+           }
+           console.error(`Service: [${environment}] Error fetching endpoint ${ep} (HTTP ${httpStatusCode || 'N/A'}):`, message, error);
+           return of({ endpoint: ep, data: null, error: { message, httpStatusCode } });
+        })
+      )
+    );
+
+    this.fetchSubscriptions[environment] = forkJoin(dataFetchObservables).subscribe({
+      next: (results: EndpointDataResult[]) => {
+        // Determine overall status for logging (as discussed previously)
+        let allEndpointsFailed = true;
+        let someEndpointsFailed = false;
+
+        // ***** CORRECT TYPE DECLARATION FOR newErrors *****
+        const newData: { [endpoint: string]: any | null } = {};
+        const newErrors: { [endpoint: string]: ErrorPayload | null } = {}; // Explicitly type this
+
+        results.forEach(result => {
+          newData[result.endpoint] = result.data;
+          // ***** ASSIGNMENT IS NOW TYPE-CORRECT *****
+          // result.error is already ErrorPayload | null from the catchError
+          newErrors[result.endpoint] = result.error;
+          if (!result.error) {
+            allEndpointsFailed = false;
+          } else {
+            someEndpointsFailed = true;
+          }
+        });
+
+        // Corrected Logging
+        if (allEndpointsFailed && results.length > 0) { // Ensure results array is not empty before declaring all failed
+          console.warn(`Service: [${environment}] Fetch operation completed, but ALL individual endpoints reported errors.`);
+        } else if (someEndpointsFailed) {
+          console.log(`Service: [${environment}] Fetch operation completed, but SOME individual endpoints reported errors.`);
+        } else {
+          console.log(`Service: [${environment}] Fetch operation completed successfully for all endpoints.`);
+        }
+
+        this.updateCacheEntry(environment, {
+          timestamp: Date.now(),
+          data: newData,
+          errors: newErrors, // ***** This assignment is now type-correct *****
+          fetchInProgress: false,
+          generalError: allEndpointsFailed && results.length > 0 ? `Failed to fetch required data for ${environment}.` : undefined
+        });
+        this.setLoadingState(environment, false);
+        delete this.fetchSubscriptions[environment];
+      },
+      error: (err) => {
+         console.error(`Service: [${environment}] Unexpected error in forkJoin:`, err);
+         this.updateCacheEntry(environment, {
+             fetchInProgress: false,
+             generalError: `Unexpected error fetching data: ${err.message || 'Unknown error'}`,
+             timestamp: 0
+         });
+         this.setLoadingState(environment, false);
+         delete this.fetchSubscriptions[environment];
+      }
+    });
+  }
+
+  // ... (rest of the service: clearCache methods, isCacheValid, ensureLoadingSubjectExists, setLoadingState, updateCacheEntry) ...
+}
