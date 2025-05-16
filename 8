@@ -1,0 +1,12 @@
+<ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+    <div style="background: #f0f0f0; padding: 10px; border: 1px solid #ccc; margin-bottom: 10px;">
+        <h5 style="margin-top:0;">Debug Info from ActuatorDataComponent Template:</h5>
+        <pre>isLoading$: {{ isLoading$ | async | json }}</pre>
+        <pre>selectedView: {{ selectedView | json }}</pre>
+        <pre>currentEnvState: {{ currentEnvState | json }}</pre>
+        <pre>getHealthError(currentEnvState) output: {{ getHealthError(currentEnvState) | json }}</pre>
+        <pre>getGeneralError(currentEnvState) output: {{ getGeneralError(currentEnvState) | json }}</pre>
+    </div>
+    <div class="actuator-container">
+    ```
+
