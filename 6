@@ -1,0 +1,53 @@
+<ng-container *ngIf="currentEnvironmentState$ | async as currentEnvState">
+  <div class="actuator-container">
+    <div class="content-area">
+
+      <div *ngIf="isLoading$ | async" class="loading-container" role="status" aria-live="polite">
+          <div class="spinner"></div>
+          <span>Loading data for {{ selectedEnvironment.toUpperCase() }}...</span>
+      </div>
+
+      <div *ngIf="getGeneralError(currentEnvState) && !(isLoading$ | async)" class="alert alert-danger" role="alert">
+        <i class="fas fa-exclamation-triangle"></i>
+        <strong>Overall Status:</strong> {{ getGeneralError(currentEnvState) }}
+        <button (click)="refreshCurrentEnvironment()" class="retry-btn">Retry All</button>
+      </div>
+
+      <div *ngIf="!(isLoading$ | async)" class="data-display">
+
+          <app-overview-display
+               *ngIf="selectedView === 'overview'"
+               [healthData]="getHealthData(currentEnvState)"
+               [healthError]="getHealthError(currentEnvState)"
+               [infoData]="getInfoData(currentEnvState)"
+               [infoError]="getInfoError(currentEnvState)"
+               [environment]="selectedEnvironment">
+           </app-overview-display>
+
+          <ng-container *ngIf="selectedView !== 'overview'">
+              <div *ngIf="getErrorForView(currentEnvState, selectedView) && !getGeneralError(currentEnvState) as viewError" class="alert alert-warning" role="alert">
+                  <i class="fas fa-exclamation-triangle"></i>
+                  <strong>Error loading {{ selectedView }}:</strong> {{ viewError.message }}
+                  <span *ngIf="viewError.httpStatusCode"> (HTTP {{ viewError.httpStatusCode }})</span>
+              </div>
+              <app-actuator-display
+                   *ngIf="!getErrorForView(currentEnvState, selectedView) && !getGeneralError(currentEnvState)"
+                   [data]="getDataForView(currentEnvState, selectedView)"
+                   [endpoint]="selectedView">
+               </app-actuator-display>
+          </ng-container>
+      </div>
+
+       <div *ngIf="!(isLoading$ | async) && !getGeneralError(currentEnvState)">
+            <div *ngIf="selectedView === 'overview' && !getHealthData(currentEnvState) && !getInfoData(currentEnvState) && !getHealthError(currentEnvState) && !getInfoError(currentEnvState) && currentEnvState && !currentEnvState.fetchInProgress" class="no-data">
+                 No Health or Info data available for {{ selectedEnvironment.toUpperCase() }}.
+            </div>
+            <div *ngIf="selectedView !== 'overview' && !getDataForView(currentEnvState, selectedView) && !getErrorForView(currentEnvState, selectedView) && currentEnvState && !currentEnvState.fetchInProgress" class="no-data">
+                 No data available for {{ selectedView }} in {{ selectedEnvironment.toUpperCase() }}.
+            </div>
+            <div *ngIf="!currentEnvState && !getGeneralError(currentEnvState)" class="no-data">
+                Data for {{ selectedEnvironment.toUpperCase() }} has not been loaded.
+            </div>
+       </div>
+
+    </div> </div> </ng-container>
